@@ -58,7 +58,7 @@ async def _prepare(request: Preparation, client: httpx.AsyncClient, key: str) ->
     tokens = words(request.context)
     target = {w["id"] for w in tokens if w["start"] >= request.start and w["end"] <= request.end}
     payload = {"context": request.context, "words": [{"id":w["id"],"text":w["text"]} for w in tokens],
-               "target_word_ids": sorted(target), "language": "English" if request.language == "en" else "Italian"}
+               "target_word_ids": sorted(target), "language": {"en":"English", "it":"Italian", "pl":"Polish"}[request.language]}
     messages = [{"role": "system", "content": PROMPT},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
     spent = 0

@@ -40,6 +40,13 @@ def test_expands_hover_to_expression(monkeypatch):
     assert seen[0]["model"] == "openai/gpt-oss-120b"
 
 
+def test_polish_lookup(monkeypatch):
+    request=Lookup(context="Det er lige meget.",start=7,end=11,language="pl")
+    execute,seen=run_lookup(monkeypatch,[answer(translation="To nie ma znaczenia")],request)
+    assert asyncio.run(execute())["translation"]=="To nie ma znaczenia"
+    assert json.loads(seen[0]["messages"][1]["content"])["language"]=="Polish"
+
+
 def test_provider_schema_rejection_retries_without_reusing_failed_generation(monkeypatch):
     execute,seen=run_lookup(monkeypatch,[httpx.Response(400,json={"error":{"code":"json_validate_failed","failed_generation":"PRIVATE FRAGMENT"}}),answer()])
     assert asyncio.run(execute())["translation"]=="It doesn't matter"

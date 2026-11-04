@@ -1,6 +1,6 @@
 # Dansk
 
-A static Danish reader with contextual English and Italian meanings. Paste text
+A static Danish reader with contextual English, Italian, and Polish meanings. Paste text
 or open TXT, DOCX, or PDF. PDFs keep their original appearance. Meanings prepare
 in the background; hovering shows a small translation-only box instantly when
 ready. Hovering unprepared text never sends an extra request. Selecting text and pressing
@@ -96,7 +96,7 @@ You can also deploy the contents of `dist/` to any static HTTPS host. See
 - Prepared words and recognized expression selections have instant meanings.
   Other selections offer an explicit full-translation request (up to 2,000 context
   characters), cached in memory; a loading box appears while waiting. Click to pin, Escape to close; use arrow keys and Enter for keyboard
-  reading. English and Italian prepare and cache separately.
+  reading. English, Italian, and Polish prepare and cache separately.
 - One request runs at a time, with a 15-second timeout and pacing based on token
   usage. Errors pause preparation; **Retry** respects quota cooldowns. Reading
   and cached meanings remain usable. The app never switches providers or plans. Explicit selection requests wait for

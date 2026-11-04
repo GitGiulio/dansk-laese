@@ -69,6 +69,13 @@ def test_preparation_caps_target_words():
         Preparation(context=context,start=0,end=len(context),language="en")
 
 
+def test_polish_preparation(monkeypatch):
+    request=Preparation(context="Det er lige meget.",start=0,end=17,language="pl")
+    execute,seen=run(monkeypatch,[response([entry([0,1,2,3],"To nie ma znaczenia")])],request)
+    assert asyncio.run(execute())["entries"][0]["translation"]=="To nie ma znaczenia"
+    assert json.loads(seen[0]["messages"][1]["content"])["language"]=="Polish"
+
+
 def test_rate_limit_does_not_retry(monkeypatch):
     execute,seen=run(monkeypatch,[httpx.Response(429,headers={"retry-after":"12"})])
     with pytest.raises(TranslationError) as error:

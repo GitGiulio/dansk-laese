@@ -27,7 +27,7 @@ class Lookup(BaseModel):
     context: str = Field(min_length=1, max_length=2000)
     start: int = Field(ge=0)
     end: int = Field(gt=0)
-    language: Literal["en", "it"]
+    language: Literal["en", "it", "pl"]
 
     @model_validator(mode="after")
     def boundaries(self):
@@ -130,7 +130,7 @@ async def _request(lookup: Lookup, client: httpx.AsyncClient, key: str) -> dict:
     tokens = words(lookup.context)
     target = [w["id"] for w in tokens if w["start"] >= lookup.start and w["end"] <= lookup.end]
     payload = {"context": lookup.context, "words": [{"id": w["id"], "text": w["text"]} for w in tokens], "target_word_ids": target,
-               "language": "English" if lookup.language == "en" else "Italian"}
+               "language": {"en":"English", "it":"Italian", "pl":"Polish"}[lookup.language]}
     messages = [{"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
     for attempt in range(2):

@@ -55,7 +55,7 @@ def prepared(body,translation=None):
         entries=[{"word_ids":sorted(target),"translation":translation or meaning,"uncertain":False}]
         return {"choices":[{"message":{"content":json.dumps({"entries":entries})}}],"usage":{"total_tokens":1}}
     expressions=[]
-    for first,last,meaning in [("lige","meget","Non importa" if body["language"]=="Italian" else "It doesn't matter"),("slog","op","looked up")]:
+    for first,last,meaning in [("lige","meget",{"Italian":"Non importa","Polish":"To nie ma znaczenia"}.get(body["language"],"It doesn't matter")),("slog","op","looked up")]:
         for token in tokens:
             if token["text"]==first:
                 end=next((w for w in tokens if w["id"]>token["id"] and w["text"]==last),None)
@@ -354,6 +354,22 @@ def test_background_starts_without_hover_and_cached_hovers_are_instant(page):
     assert page.locator("#api-key").input_value()==""
     assert page.locator("#paste").input_value()==""
     assert page.evaluate("localStorage.length+sessionStorage.length")==0
+
+
+def test_polish_target_is_separate_from_english_and_italian_cache(page):
+    read(page,"Det er lige meget.")
+    page.locator('#language').select_option('pl');ready(page)
+    page.locator('.word').filter(has_text='lige').hover()
+    assert page.locator('#tooltip').inner_text()=='To nie ma znaczenia'
+    assert page.preparations[-1]['language']=='Polish'
+    page.locator('#language').select_option('it');ready(page)
+    page.locator('.word').filter(has_text='lige').hover()
+    assert page.locator('#tooltip').inner_text()=='Non importa'
+    count=len(page.preparations)
+    page.locator('#language').select_option('pl');ready(page)
+    page.locator('.word').filter(has_text='lige').hover()
+    assert page.locator('#tooltip').inner_text()=='To nie ma znaczenia'
+    assert len(page.preparations)==count
 
 
 def test_unprepared_hover_does_not_request_and_updates_when_background_finishes(page):

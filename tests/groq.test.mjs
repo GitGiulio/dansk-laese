@@ -7,6 +7,18 @@ const options = body => ({body:JSON.stringify(body),signal:new AbortController()
 const response = (entries, tokens=100) => Response.json({choices:[{message:{content:JSON.stringify({entries})}}],usage:{total_tokens:tokens}});
 const entry = (word_ids=[1,3]) => ({word_ids,translation:'picks up',uncertain:false});
 
+test('Polish is sent as the target for background and full-selection translations',async()=>{
+  for(const selection of [false,true]){
+    const prepare=groq.createGroqPreparer(()=> 'key',async(_url,init)=>{
+      assert.equal(JSON.parse(JSON.parse(init.body).messages[1].content).language,'Polish');
+      return response([{...entry([1]),translation:'podnosi'}]);
+    },{selection});
+    const result=await prepare('',options({...payload,language:'pl'}));
+    assert.equal(result.status,200);
+    assert.equal((await result.json()).entries[0].translation,'podnosi');
+  }
+});
+
 test('preparer calls Groq directly with memory key and returns separated expression offsets', async () => {
   let call;
   const prepare = groq.createGroqPreparer(()=> ' test-key ',async (url,init) => {call={url,init};return response([entry()]);});
