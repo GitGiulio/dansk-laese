@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self' https://api.groq.com https://*.supabase.co; worker-src 'self'; img-src 'self' data: blob:; font-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <title>Dansk</title>
+  <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./vendor/pdfjs/web/pdf_viewer.css">
+  <link rel="stylesheet" href="./styles.css">
+  <script type="module" src="./app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="masthead">
+    <a class="brand" href="./" aria-label="Dansk home">Dansk<span>.</span></a>
+    <nav id="session-controls" hidden aria-label="Session"><span id="session-label" hidden></span><button id="change-key" class="text-button" hidden>API key</button><button id="disconnect" class="text-button">Disconnect</button></nav>
+  </header>
+  <main id="main">
+    <div id="app-status" class="notice" role="status" hidden></div>
+    <section id="auth-screen" class="auth-layout" aria-labelledby="auth-heading">
+      <p class="eyebrow">DANISH READER</p>
+      <h1 id="auth-heading">Read in context<span class="accent">.</span></h1>
+      <div class="auth-card">
+        <div class="auth-tabs" role="group" aria-label="Connection options">
+          <button type="button" data-auth-mode="key" aria-pressed="true">API key</button>
+          <button type="button" data-auth-mode="login" aria-pressed="false">Log in</button>
+          <button type="button" data-auth-mode="signup" aria-pressed="false">Create account</button>
+        </div>
+        <form id="api-key-form">
+          <label for="api-key">Groq API key</label><input id="api-key" type="password" autocomplete="off" required maxlength="512" spellcheck="false">
+          <label id="save-key-label" class="checkbox" hidden><input id="save-key" type="checkbox" checked> Save encrypted key to my account</label>
+          <button class="primary full" type="submit">Continue</button>
+          <p class="form-note">Your key stays in this tab. Text is sent to Groq.</p>
+        </form>
+        <form id="login-form" hidden>
+          <label for="login-email">Username</label><input id="login-email" type="text" autocomplete="username" required>
+          <label for="login-password">Password</label><input id="login-password" type="password" autocomplete="current-password" required>
+          <button class="primary full" type="submit">Log in</button>
+        </form>
+        <form id="signup-form" hidden>
+          <label for="signup-email">Username</label><input id="signup-email" type="text" pattern="[A-Za-z0-9_]{3,24}" minlength="3" maxlength="24" autocomplete="username" required>
+          <p id="username-status" role="status" hidden></p><button id="username-suggestion" type="button" class="text-button" hidden></button>
+          <label for="signup-password">Password <span class="muted">(12 characters minimum)</span></label><input id="signup-password" type="password" autocomplete="new-password" minlength="12" required>
+          <label for="signup-password-confirm">Confirm password</label><input id="signup-password-confirm" type="password" autocomplete="new-password" required>
+          <label for="signup-key">Groq API key</label><input id="signup-key" type="password" autocomplete="off" maxlength="512" spellcheck="false" required>
+          <button class="primary full" type="submit">Create account</button>
+          <p class="form-note">Your API key is encrypted before it is saved.</p>
+        </form>
+        <p id="auth-status" role="status" hidden></p>
+      </div>
+      <a class="quiet-link" href="https://console.groq.com/keys" target="_blank" rel="noopener noreferrer">Get a free Groq key ↗</a>
+    </section>
+    <section id="import-screen" class="import-layout" hidden aria-labelledby="import-heading">
+      <p class="eyebrow">DANISH READER</p><h1 id="import-heading">Open a text<span class="accent">.</span></h1>
+      <div class="import-card">
+        <form id="import-form">
+          <label for="paste">Danish text</label><textarea id="paste" placeholder="Der var engang…" spellcheck="false" lang="da"></textarea>
+          <div class="input-meta"><span id="paste-count">0 characters</span><button id="sample" type="button" class="text-button">Try a passage</button></div>
+          <button type="submit" id="prepare" class="primary full">Preview</button>
+        </form>
+        <div class="divider">or</div>
+        <label class="file-drop" for="file-input"><strong>Open a file ↑</strong><span>TXT, DOCX, PDF · up to 10 MiB</span><input id="file-input" type="file" accept=".txt,.docx,.pdf"></label>
+      </div>
+    </section>
+    <section id="preview-screen" class="preview-layout" hidden aria-labelledby="preview-heading">
+      <div class="section-heading"><h1 id="preview-heading">Preview<span class="accent">.</span></h1><button id="cancel-preview" class="secondary">Back</button></div>
+      <ul id="import-warnings" class="warnings" hidden></ul>
+      <label for="preview-text">Edit text</label><textarea id="preview-text" spellcheck="false" lang="da"></textarea>
+      <div class="preview-footer"><span id="preview-count"></span><button id="start-reading" class="primary">Start reading →</button></div>
+    </section>
+    <section id="reader-screen" hidden aria-labelledby="reader-title">
+      <div class="reader-toolbar">
+        <div><h1 id="reader-title">Read<span class="accent">.</span></h1><p id="document-meta"></p></div>
+        <div class="reader-controls"><label id="reading-mode-control" for="reading-mode" hidden>View<select id="reading-mode"><option value="pdf">Original PDF</option><option value="text">Text view</option></select></label><label for="language">Translation<select id="language"><option value="en">English</option><option value="it">Italiano</option></select></label><label id="font-size-control" for="font-size">Text size<input id="font-size" type="range" min="18" max="32" value="23"></label><button id="edit-document" class="secondary">Edit text</button><button id="new-document" class="secondary">New text</button></div>
+      </div>
+      <div id="pdf-controls" class="pdf-controls" hidden><div class="page-controls"><button id="pdf-previous" class="secondary" aria-label="Previous page">←</button><label for="pdf-page">Page <input id="pdf-page" type="number" min="1" value="1"></label><span id="pdf-page-count"></span><button id="pdf-next" class="secondary" aria-label="Next page">→</button></div><label for="pdf-zoom">Zoom<select id="pdf-zoom"><option value="fit">Fit width</option><option value="1">100%</option><option value="1.5">150%</option><option value="2">200%</option></select></label></div>
+      <div class="preparation-strip"><progress id="preparation-progress" value="0" max="1" aria-label="Translation preparation"></progress><span id="preparation-status" role="status"></span><button id="retry-preparation" class="text-button" hidden>Retry</button></div>
+      <p id="lookup-status" class="lookup-status" role="status" hidden></p>
+      <div id="reader-paper" class="reader-paper"><article id="reader" lang="da" aria-label="Danish text" tabindex="0"></article><div id="end-mark" hidden></div></div>
+    </section>
+  </main>
+  <aside id="tooltip" class="translation-card" role="tooltip" hidden><p id="translation-text" aria-live="polite"></p></aside>
+  <button id="selection-translate" class="selection-button" hidden>Translate selection</button>
+</body>
+</html>

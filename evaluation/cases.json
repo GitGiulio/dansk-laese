@@ -1,0 +1,14 @@
+[
+  {"id":"indifference","context":"Vil du gå nu eller senere? Det er lige meget for mig.","target":"lige","expected":{"en":"It does not matter; either option is fine.","it":"Non importa; entrambe le opzioni vanno bene."},"expression":"lige meget"},
+  {"id":"married","context":"De har været gift i ti år og har to børn.","target":"gift","expected":{"en":"married","it":"sposati"},"expression":"gift"},
+  {"id":"poison","context":"Flasken indeholder en farlig gift. Du må ikke drikke af den.","target":"gift","expected":{"en":"poison; a toxic substance","it":"veleno; una sostanza tossica"},"expression":"gift"},
+  {"id":"lookup","context":"Hun slog det ukendte ord op i ordbogen.","target":"slog","expected":{"en":"looked up a word in the dictionary","it":"ha cercato una parola nel dizionario"},"expression":"slog … op"},
+  {"id":"give-up","context":"Efter mange forsøg gav hun endelig op.","target":"gav","expected":{"en":"gave up; stopped trying","it":"si è arresa; ha smesso di provare"},"expression":"gav … op"},
+  {"id":"care","context":"Han tager sig af sin syge mor hver dag.","target":"tager","expected":{"en":"takes care of; looks after","it":"si prende cura di"},"expression":"tager sig af"},
+  {"id":"anticipation","context":"Jeg glæder mig til ferien i næste uge.","target":"glæder","expected":{"en":"am looking forward to","it":"non vedo l'ora; attendo con piacere"},"expression":"glæder mig til"},
+  {"id":"expensive","context":"Det nye hus kostede en bondegård, så vi måtte låne penge.","target":"bondegård","expected":{"en":"cost a fortune; was very expensive, not a literal farm","it":"è costato una fortuna; era molto caro"},"expression":"kostede en bondegård"},
+  {"id":"permission","context":"Jeg fik lov til at gå hjem tidligere i dag.","target":"lov","expected":{"en":"was allowed to; got permission to","it":"mi è stato permesso di; ho avuto il permesso di"},"expression":"fik lov til"},
+  {"id":"inflected-verb","context":"Børnene løb gennem haven, da det begyndte at regne.","target":"løb","expected":{"en":"ran; past tense of run","it":"correvano; sono corsi"},"expression":"løb"},
+  {"id":"repeated-occurrence","context":"Hun fik en bog og gav en bog til sin ven.","target":"bog","occurrence":1,"expected":{"en":"book; the second occurrence, the book given to her friend","it":"libro; la seconda occorrenza, il libro dato al suo amico"},"expression":"bog"},
+  {"id":"financial-bank","context":"Hun satte pengene ind i banken efter at have fået sin løn.","target":"banken","expected":{"en":"the bank; financial institution","it":"la banca; istituto finanziario"},"expression":"banken"}
+]
