@@ -44,13 +44,29 @@ Choose **API key** for a one-tab session, **Log in**, or **Create account**.
 Get a key from [Groq Console](https://console.groq.com/keys). The browser calls
 Groq directly with your key. This version does not read `.env`; your existing
 private file is kept for optional Python evaluation tools only.
+Use **Add key** to enter up to eight masked keys, and **Manage keys** to edit them
+later. **Show/Hide** reveals a key for identification; **Remove** deletes a row.
+Press **Continue**, with **Save encrypted keys to my account** checked, to save
+the updated list. At least one key is required to continue reading.
+All configured keys are assumed to have independent quotas and can prepare
+concurrently, with one token budget per key.
 
 ## Accounts
 
 Readers choose a unique username and password; no email address is requested.
 Names use 3 to 24 letters, digits or underscores and are case insensitive. Signup
 checks availability and offers a clickable small variation when a name is taken.
-Supabase still manages passwords and stores only the encrypted Groq key.
+Supabase still manages passwords and stores only the encrypted Groq keys and
+legacy quota preference. Existing accounts and single-key vaults remain valid without
+migration or changes to the Supabase setup. Multi-key vaults use a new encrypted
+format only when saved; login never rewrites an existing vault.
+
+Account sign-in survives refresh and browser reopening. IndexedDB remembers the
+Supabase access/refresh tokens and a non-exportable vault-unlocking CryptoKey,
+without saving the password or plaintext Groq keys. The app verifies the account
+with Supabase on restoration and refreshes expired tokens. **Log out** removes
+the remembered session, including when the remote logout request fails. Existing
+users only need to log in once after this update; no account migration is needed.
 
 One-time owner setup is required in your existing Supabase project:
 
@@ -69,8 +85,9 @@ See [`docs/accounts.md`](docs/accounts.md) for details and recovery limitations.
 ## Reading and privacy
 
 - Documents and prepared meanings stay in tab memory. Refresh or disconnect
-  clears the session. No localStorage, sessionStorage, cookies, or database is
-  used by the reader to persist documents or unlocked keys.
+  clears them. Account sign-in is remembered separately in IndexedDB; documents,
+  translations, passwords and plaintext API keys are never written there.
+  Direct API-key entry without an account remains limited to the current tab.
 - Preparing sends the document in chunks of up to 48 target words with nearby
   context (normally up to 800 characters, adjusted to fit the request budget) to Groq, in the chosen language. The model is
   `openai/gpt-oss-120b`. It handles idioms and separated expressions by source-word
@@ -81,10 +98,14 @@ See [`docs/accounts.md`](docs/accounts.md) for details and recovery limitations.
   Other selections offer an explicit full-translation request (up to 2,000 context
   characters), cached in memory; a loading box appears while waiting. Click to pin, Escape to close; use arrow keys and Enter for keyboard
   reading. English, Italian, and Polish prepare and cache separately.
-- One request runs at a time. The visible page and the top visible word take
+- All configured keys can prepare concurrently, up to eight requests at a time.
+  Explicit selections wait for active preparation and then take priority.
+  The visible page and the top visible word take
   priority after any request already in flight. Scrolling reprioritizes queued work,
   including chunks still waiting for token allowance.
-- The shared budget is 8,000 tokens per rolling minute. Each request reserves its
+- Each key has its own budget of 8,000 tokens per rolling minute. Budget state
+  survives key editing and document changes, indexed by key fingerprints rather
+  than retained plaintext credentials. Each request reserves its
   estimated complete JSON input plus maximum output, with a 7,200-token request
   ceiling. Input estimates use UTF-8 bytes divided by three plus chat overhead;
   they are estimates, not an exact model tokenizer. Actual usage replaces estimates

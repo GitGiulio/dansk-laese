@@ -6,6 +6,48 @@ import {REQUEST_TOKEN_LIMIT} from '../static/budget.js';
 
 const paragraph = text => ({text,words:[...text.matchAll(/[\p{L}\p{N}]+/gu)].map((m,id)=>({id,text:m[0],start:Array.from(text.slice(0,m.index)).length,end:Array.from(text.slice(0,m.index+m[0].length)).length}))});
 const p=paragraph('Det er lige meget.');
+
+test('parallel preparation is bounded and reset discards every in-flight result',async()=>{
+  const pending=[],seen=[];
+  const client=new PreparationClient({configured:true,concurrency:2},async(_url,options)=>{
+    const gate=deferred(),body=JSON.parse(options.body);pending.push(gate);seen.push(options);
+    await gate.promise;return ok(prepared(body));
+  });
+  const source=paragraph(Array.from({length:130},(_,i)=>`ord${i}`).join(' '));
+  client.prioritize([source],'en');await wait(()=>pending.length===2);
+  assert.equal(pending.length,2);client.reset();
+  assert.ok(seen.every(options=>options.signal.aborted));
+  pending.forEach(gate=>gate.resolve());await new Promise(resolve=>setTimeout(resolve,5));
+  assert.equal(client.status().ready,0);assert.equal(client.status().running,false);
+});
+
+test('manual selection yields every budget-waiting job and parallel preparation resumes completely',async()=>{
+  let waiting=true,calls=0;
+  const client=new PreparationClient({configured:true,concurrency:2},async(_url,options)=>{
+    calls++;const body=JSON.parse(options.body);
+    if(waiting){options.onBudgetWait(true);await new Promise((_resolve,reject)=>options.signal.addEventListener('abort',()=>reject(options.signal.reason),{once:true}));}
+    return ok(prepared(body));
+  });
+  const source=paragraph(Array.from({length:130},(_,i)=>`ord${i}`).join(' '));
+  client.prioritize([source],'en');await wait(()=>calls===2);
+  client.suspended=true;client.yieldWaiting();await wait(()=>!client.status().running);
+  assert.equal(client.queue.length,3);assert.equal(client.status().error,'');
+  waiting=false;client.suspended=false;client.pump();await wait(()=>client.status().ready===130);
+  for(const word of source.words)assert.deepEqual(client.get(source,word.start,word.end,'en').highlights,[{start:word.start,end:word.end}]);
+  client.reset();
+});
+
+test('concurrent rate-limit responses preserve the longest cooldown',async()=>{
+  const gates=[deferred(),deferred()];let calls=0;
+  const client=new PreparationClient({configured:true,concurrency:2},async()=>{
+    const index=calls++;await gates[index].promise;
+    return Response.json({detail:'Wait for quota.'},{status:429,headers:{'Retry-After':index?'1':'120'}});
+  });
+  client.prioritize([paragraph(Array.from({length:80},(_,i)=>`ord${i}`).join(' '))],'en');
+  await wait(()=>calls===2);gates[0].resolve();await wait(()=>client.status().error);
+  const deadline=client.pausedUntil;gates[1].resolve();await wait(()=>!client.status().running);
+  assert.ok(client.pausedUntil>=deadline);client.reset();
+});
 const ok=value=>({ok:true,json:async()=>value,headers:new Headers()});
 const deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};};
 const wait=async predicate=>{for(let i=0;i<1000;i++){if(predicate())return;await new Promise(r=>setTimeout(r,1));}throw new Error('Timed out waiting for preparation');};

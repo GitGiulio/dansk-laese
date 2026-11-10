@@ -24,6 +24,10 @@ p { margin-top:0; }
 label { display:block; font-size:12px; font-weight:500; margin:0 0 9px; }
 input:not([type=range]):not([type=checkbox]):not([type=file]),textarea,select { border:1px solid var(--line); border-radius:4px; background:var(--paper); color:var(--ink); padding:12px; }
 .auth-card input:not([type=checkbox]) { width:100%; margin-bottom:22px; }
+.key-row { display:flex; align-items:center; gap:12px; }
+.key-row input { min-width:0; }
+.key-row button { flex-shrink:0; margin-bottom:22px; }
+.add-key { margin-bottom:22px; }
 textarea { width:100%; resize:vertical; line-height:1.7; }
 textarea::placeholder { color:#757882; }
 #paste { min-height:190px; }

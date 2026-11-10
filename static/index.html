@@ -16,7 +16,7 @@
   <a class="skip-link" href="#main">Skip to content</a>
   <header class="masthead">
     <a class="brand" href="./" aria-label="Dansk home">Dansk<span>.</span></a>
-    <nav id="session-controls" hidden aria-label="Session"><span id="session-label" hidden></span><button id="change-key" class="text-button" hidden>API key</button><button id="disconnect" class="text-button">Disconnect</button></nav>
+    <nav id="session-controls" hidden aria-label="Session"><span id="session-label" hidden></span><button id="change-key" class="text-button">Manage keys</button><button id="disconnect" class="text-button">Disconnect</button></nav>
   </header>
   <main id="main">
     <div id="app-status" class="notice" role="status" hidden></div>
@@ -30,8 +30,10 @@
           <button type="button" data-auth-mode="signup" aria-pressed="false">Create account</button>
         </div>
         <form id="api-key-form">
-          <label for="api-key">Groq API key</label><input id="api-key" type="password" autocomplete="off" required maxlength="512" spellcheck="false">
-          <label id="save-key-label" class="checkbox" hidden><input id="save-key" type="checkbox" checked> Save encrypted key to my account</label>
+          <label for="api-key">Groq API keys</label>
+          <div id="api-key-list" class="key-list"><input id="api-key" type="password" autocomplete="off" required maxlength="512" spellcheck="false"></div>
+          <button type="button" class="text-button add-key" data-add-key="api-key">Add key</button>
+          <label id="save-key-label" class="checkbox" hidden><input id="save-key" type="checkbox" checked> Save encrypted keys to my account</label>
           <button class="primary full" type="submit">Continue</button>
           <p class="form-note">Your key stays in this tab. Text is sent to Groq.</p>
         </form>
@@ -45,9 +47,11 @@
           <p id="username-status" role="status" hidden></p><button id="username-suggestion" type="button" class="text-button" hidden></button>
           <label for="signup-password">Password <span class="muted">(12 characters minimum)</span></label><input id="signup-password" type="password" autocomplete="new-password" minlength="12" required>
           <label for="signup-password-confirm">Confirm password</label><input id="signup-password-confirm" type="password" autocomplete="new-password" required>
-          <label for="signup-key">Groq API key</label><input id="signup-key" type="password" autocomplete="off" maxlength="512" spellcheck="false" required>
+          <label for="signup-key">Groq API keys</label>
+          <div id="signup-key-list" class="key-list"><input id="signup-key" type="password" autocomplete="off" maxlength="512" spellcheck="false" required></div>
+          <button type="button" class="text-button add-key" data-add-key="signup-key">Add key</button>
           <button class="primary full" type="submit">Create account</button>
-          <p class="form-note">Your API key is encrypted before it is saved.</p>
+          <p class="form-note">Your API keys are encrypted before they are saved.</p>
         </form>
         <p id="auth-status" role="status" hidden></p>
       </div>

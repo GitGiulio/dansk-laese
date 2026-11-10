@@ -1,4 +1,6 @@
 import {normalizeUsername,usernameEmail,usernameFromEmail} from './usernames.js';
+import {normalizeConnection} from './keys.js';
+import {sessionStorageFor} from './session.js';
 
 const encoder = new TextEncoder();
 const uuid = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i;
@@ -30,10 +32,12 @@ async function deriveKey(password,salt) {
 }
 
 async function encryptedRecord(apiKey,key,salt,email) {
-  if (typeof apiKey !== 'string' || !apiKey.trim() || apiKey.length > 4096) throw new Error('Enter a valid API key.');
+  const legacy=typeof apiKey==='string';
+  const connection=normalizeConnection(apiKey);
+  const plaintext=legacy?connection.keys[0]:JSON.stringify(connection);
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ciphertext = await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:encoder.encode(email.trim().toLowerCase())},key,encoder.encode(apiKey.trim()));
-  return {version:1,salt:encode(salt),iv:encode(iv),ciphertext:encode(ciphertext)};
+  const ciphertext = await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:encoder.encode(email.trim().toLowerCase())},key,encoder.encode(plaintext));
+  return {version:legacy?1:2,salt:encode(salt),iv:encode(iv),ciphertext:encode(ciphertext)};
 }
 
 export class AccountClient {
@@ -44,18 +48,83 @@ export class AccountClient {
   #key = null;
   #salt = null;
   #generation = 0;
+  #storage;
+  #storageWork=Promise.resolve();
+  #refreshToken=null;
+  #expiresAt=0;
+  #refreshing=null;
 
-  constructor(config = {},fetcher = globalThis.fetch.bind(globalThis)) {
+  constructor(config = {},fetcher = globalThis.fetch.bind(globalThis),{storage}={}) {
     this.#config = publicConfiguration(config);
     this.#fetch = fetcher;
+    this.#storage=storage || sessionStorageFor(this.#config?.url || 'disabled');
   }
 
   get configured() { return this.#config !== null; }
   get user() { return this.#user ? {...this.#user} : null; }
 
-  clear() {
+  clear({forget=true}={}) {
     this.#generation++;
     this.#user = this.#token = this.#key = this.#salt = null;
+    this.#refreshToken=null;this.#expiresAt=0;this.#refreshing=null;
+    if(forget)this.#storageWork=this.#storageWork.catch(()=>{}).then(()=>this.#storage.remove()).catch(()=>{});
+  }
+
+  async #remember() {
+    if(!this.#refreshToken || !this.#key)return;
+    const generation=this.#generation;
+    const record={version:1,user:{...this.#user},accessToken:this.#token,refreshToken:this.#refreshToken,
+      expiresAt:this.#expiresAt,key:this.#key,salt:encode(this.#salt)};
+    this.#storageWork=this.#storageWork.catch(()=>{}).then(()=>{
+      if(generation===this.#generation)return this.#storage.set(record);
+    }).catch(()=>{});
+    await this.#storageWork;
+  }
+
+  #tokens(session) {
+    this.#token=session.access_token;
+    this.#refreshToken=typeof session.refresh_token==='string'?session.refresh_token:null;
+    this.#expiresAt=Number.isFinite(session.expires_at)?session.expires_at*1000:Date.now()+(Number(session.expires_in)||3600)*1000;
+  }
+
+  async restore() {
+    if(!this.configured)return null;
+    const generation=++this.#generation;
+    await this.#storageWork;
+    const record=await this.#storage.get();this.#check(generation);
+    if(!record)return null;
+    try{
+      if(record.version!==1 || !uuid.test(record.user?.id) || typeof record.user?.email!=='string'
+        || typeof record.accessToken!=='string' || !record.accessToken || typeof record.refreshToken!=='string' || !record.refreshToken
+        || !Number.isFinite(record.expiresAt) || record.key?.type!=='secret' || record.key?.extractable!==false
+        || record.key?.algorithm?.name!=='AES-GCM')throw new Error('Your saved sign-in is invalid. Log in again.');
+      let session;
+      if(record.expiresAt>Date.now()+30000){
+        const user=await this.#request('/auth/v1/user',{token:record.accessToken});
+        session={user,access_token:record.accessToken,refresh_token:record.refreshToken,expires_at:record.expiresAt/1000};
+      }else session=await this.#request('/auth/v1/token?grant_type=refresh_token',{method:'POST',body:{refresh_token:record.refreshToken}});
+      this.#check(generation);
+      if(session.user?.id!==record.user.id || session.user?.email?.toLowerCase()!==record.user.email.toLowerCase())throw new Error('The remembered account changed. Log in again.');
+      const result=await this.#openVault(session,null,generation,record);
+      await this.#remember();this.#check(generation);return result;
+    }catch(error){
+      if(generation===this.#generation){this.clear({forget:!error.transient});await this.#storageWork;}
+      throw error;
+    }
+  }
+
+  async #ensureSession() {
+    if(Date.now()+30000<this.#expiresAt || !this.#refreshToken)return;
+    if(!this.#refreshing){
+      const generation=this.#generation,user=this.#user,refreshToken=this.#refreshToken;
+      this.#refreshing=(async()=>{
+        const session=await this.#request('/auth/v1/token?grant_type=refresh_token',{method:'POST',body:{refresh_token:refreshToken}});
+        this.#check(generation);
+        if(session.user?.id!==user?.id || session.user?.email?.toLowerCase()!==user?.email?.toLowerCase() || !session.access_token)throw new Error('Your session expired. Log in again.');
+        this.#tokens(session);await this.#remember();this.#check(generation);
+      })().finally(()=>{if(generation===this.#generation)this.#refreshing=null;});
+    }
+    await this.#refreshing;
   }
 
   #check(generation) {
@@ -72,10 +141,11 @@ export class AccountClient {
         credentials:'omit',cache:'no-store',redirect:'error',signal:AbortSignal.timeout(20000),
       });
     } catch {
-      throw new Error('Account provider could not be reached. Please try again.');
+      throw Object.assign(new Error('Account provider could not be reached. Please try again.'),{transient:true});
     }
     if (!response.ok) {
-      if (response.status === 429) throw new Error('Too many account requests. Please try again later.');
+      if (response.status === 429) throw Object.assign(new Error('Too many account requests. Please try again later.'),{transient:true});
+      if (response.status >= 500) throw Object.assign(new Error('Account provider is temporarily unavailable. Please try again.'),{transient:true});
       if (response.status === 404 && path === '/rest/v1/rpc/username_available') throw new Error('Username availability is not configured. The project owner must run the username SQL setup.');
       if (response.status === 401 || response.status === 403) throw new Error('Account request was denied. Check your credentials or sign in again.');
       let code;
@@ -126,6 +196,7 @@ export class AccountClient {
       this.#check(generation);
       if (signup && !session?.access_token) throw new Error('Username signup requires email confirmations to be disabled in the Supabase project configuration.');
       const result = await this.#openVault(session,password,generation);
+      await this.#remember();this.#check(generation);
       return signup ? {confirmationRequired:false,...result} : result;
     } catch (error) {
       if (generation === this.#generation) this.clear();
@@ -143,53 +214,62 @@ export class AccountClient {
     return available;
   }
 
-  async #openVault(session,password,generation) {
+  async #openVault(session,password,generation,remembered=null) {
     if (!uuid.test(session?.user?.id) || typeof session?.user?.email !== 'string' || !session.user.email || typeof session?.access_token !== 'string' || !session.access_token) throw new Error('Account provider returned an invalid session.');
     const username = usernameFromEmail(session.user.email);
     const user = {id:session.user.id,email:session.user.email,...(username ? {username} : {})};
     const row = session.user.user_metadata?.dansk_vault;
     const hasVault = row !== undefined && row !== null;
-    let salt,key,apiKey = null,vaultLocked = false;
+    let salt,key,apiKey = null,connection,vaultLocked = false;
     try {
-      salt = hasVault ? decode(row.salt) : crypto.getRandomValues(new Uint8Array(16));
-      if (salt.length !== 16 || (hasVault && row.version !== 1)) throw new Error('Invalid vault data');
-      key = await deriveKey(password,salt);
+      salt = hasVault ? decode(row.salt) : remembered?decode(remembered.salt):crypto.getRandomValues(new Uint8Array(16));
+      if (salt.length !== 16 || (hasVault && ![1,2].includes(row.version))) throw new Error('Invalid vault data');
+      if(remembered && encode(salt)!==remembered.salt)throw new Error('Vault changed');
+      key = remembered?.key || await deriveKey(password,salt);
       if (hasVault) {
         const iv = decode(row.iv), ciphertext = decode(row.ciphertext);
         if (iv.length !== 12 || ciphertext.length < 16) throw new Error('Invalid vault data');
         const plaintext = await crypto.subtle.decrypt({name:'AES-GCM',iv,additionalData:encoder.encode(user.email.trim().toLowerCase())},key,ciphertext);
-        apiKey = new TextDecoder('utf-8',{fatal:true}).decode(plaintext);
-        if (!apiKey || apiKey.length > 4096) throw new Error('Invalid vault data');
+        const text = new TextDecoder('utf-8',{fatal:true}).decode(plaintext);
+        if(row.version===2){connection=normalizeConnection(JSON.parse(text));apiKey=connection.keys[0];}
+        else {normalizeConnection(text);apiKey=text;}
       }
     } catch {
+      if(remembered)throw new Error('Your saved keys need unlocking. Log in again.');
       if (!hasVault) throw new Error('Your browser could not initialize API-key encryption.');
       vaultLocked = true;
       apiKey = null;
+      connection = undefined;
       salt = crypto.getRandomValues(new Uint8Array(16));
       key = await deriveKey(password,salt);
     }
     this.#check(generation);
     this.#user = user;
-    this.#token = session.access_token;
+    this.#tokens(session);
     this.#salt = salt;
     this.#key = key;
-    return {user:{...user},apiKey,...(vaultLocked ? {vaultLocked:true} : {})};
+    return {user:{...user},apiKey,...(connection?{connection}:{}),...(vaultLocked ? {vaultLocked:true} : {})};
   }
 
   async saveApiKey(apiKey) {
     if (!this.#user || !this.#key) throw new Error('Sign in before saving an API key.');
-    const generation = this.#generation, user = this.#user, token = this.#token;
+    const generation = this.#generation;
+    await this.#ensureSession();
+    this.#check(generation);
+    const user = this.#user, token = this.#token;
     const record = await encryptedRecord(apiKey,this.#key,this.#salt,user.email);
     this.#check(generation);
     await this.#request('/auth/v1/user',{
       method:'PUT',token,body:{data:{dansk_vault:record}},
     });
     this.#check(generation);
+    await this.#remember();this.#check(generation);
   }
 
   async logout() {
     const token = this.#token;
     this.clear();
+    await this.#storageWork;
     if (token) await this.#request('/auth/v1/logout?scope=local',{method:'POST',token});
   }
 }

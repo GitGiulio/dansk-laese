@@ -48,7 +48,7 @@ export function preparationChunks(paragraph) {
 export class PreparationClient {
   constructor(config,fetcher=globalThis.fetch.bind(globalThis),onChange=()=>{}) {
     this.config=config;this.fetcher=fetcher;this.onChange=onChange;
-    this.records=new Map();this.queue=[];this.active=null;this.timer=null;
+    this.records=new Map();this.queue=[];this.jobs=new Set();this.timer=null;
     this.language='en';this.epoch=0;this.nextAt=0;this.pausedUntil=0;this.error='';
     this.discovering=false;
     this.metrics={requests:0,request_ms:0,budget_wait_ms:0,input_tokens:0,output_tokens:0,total_tokens:0,cached_tokens:0,estimated_tokens:0};
@@ -56,9 +56,15 @@ export class PreparationClient {
 
   key(paragraph,language) {return JSON.stringify([this.config.model,this.config.prompt_version,language,paragraph.text]);}
 
+  get active() {return this.jobs.values().next().value || null;}
+
+  yieldWaiting() {
+    for(const job of this.jobs)if(job.waiting){job.reprioritized=true;job.controller.abort();}
+  }
+
   reset() {
     this.epoch++;clearTimeout(this.timer);this.timer=null;
-    this.active?.controller?.abort();this.active=null;
+    for(const job of this.jobs)job.controller.abort();this.jobs.clear();
     this.records.clear();this.queue=[];this.error='';this.discovering=false;
     for(const key of Object.keys(this.metrics))this.metrics[key]=0;
     this.nextAt=Math.max(this.nextAt,this.pausedUntil);
@@ -92,8 +98,8 @@ export class PreparationClient {
       };
       this.orderCompare=(a,b)=>rank(a)-rank(b);
       this.queue.sort(this.orderCompare);
-      if(this.active?.waiting && (this.active.language!==language || (this.queue[0] && this.orderCompare(this.queue[0],this.active)<0))){
-        this.active.reprioritized=true;this.active.controller.abort();
+      for(const job of this.jobs)if(job.waiting && (job.language!==language || (this.queue[0] && this.orderCompare(this.queue[0],job)<0))){
+        job.reprioritized=true;job.controller.abort();
       }
     }
     this.onChange();this.pump();
@@ -119,7 +125,7 @@ export class PreparationClient {
     const records=[...this.records.values()].filter(r=>r.language===this.language);
     return {ready:records.reduce((sum,r)=>sum+r.byWord.size,0),
       total:records.reduce((sum,r)=>sum+r.paragraph.words.length,0),
-      error:this.error,running:!!this.active,waiting:!!this.active?.waiting,discovering:this.discovering,metrics:{...this.metrics}};
+      error:this.error,running:!!this.active,waiting:this.jobs.size>0 && [...this.jobs].every(job=>job.waiting),discovering:this.discovering,metrics:{...this.metrics}};
   }
 
   retry() {
@@ -164,7 +170,7 @@ export class PreparationClient {
   }
 
   async pump() {
-    if(this.active || this.timer || this.error || this.suspended)return;
+    if(this.jobs.size>=Math.max(1,Math.min(8,this.config.concurrency || 1)) || this.timer || this.error || this.suspended)return;
     const index=this.queue.findIndex(job=>job.language===this.language);
     if(index<0)return;
     if(!this.config.configured){this.error='Enter your Groq API key to prepare meanings.';this.onChange();return;}
@@ -174,7 +180,8 @@ export class PreparationClient {
     }
     const job=this.queue.splice(index,1)[0],epoch=this.epoch,started=Date.now();
     const batch=this.batch(job);
-    this.active=job;job.controller=new AbortController();this.onChange();
+    this.jobs.add(job);job.controller=new AbortController();this.onChange();
+    queueMicrotask(()=>{if(epoch===this.epoch)this.pump();});
     try {
       const {offset,...payload}=batch.chunk;
       const response=await this.fetcher('prepare',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -186,7 +193,7 @@ export class PreparationClient {
         const value=result.metrics?.[key];if(Number.isFinite(value) && value>=0)this.metrics[key]+=value;
       }
       if(!response.ok){
-        if(response.status===429)this.pausedUntil=Date.now()+(Number(response.headers.get('Retry-After'))||60)*1000;
+        if(response.status===429)this.pausedUntil=Math.max(this.pausedUntil,Date.now()+(Number(response.headers.get('Retry-After'))||60)*1000);
         throw new Error(typeof result.detail==='string'?result.detail:'Preparation failed. Retry to continue.');
       }
       if(!Array.isArray(result.entries))throw new Error('Preparation returned incomplete data. Retry to continue.');
@@ -200,9 +207,10 @@ export class PreparationClient {
       }else{
         this.queue.unshift(...batch.parts.map(part=>part.job));
         this.error=['AbortError','TimeoutError'].includes(error.name)?'Preparation timed out. Retry to continue.':error.message;
+        this.yieldWaiting();
       }
     } finally {
-      if(this.active===job)this.active=null;
+      this.jobs.delete(job);
       if(epoch===this.epoch){this.onChange();this.pump();}
     }
   }

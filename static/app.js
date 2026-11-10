@@ -2,7 +2,8 @@ import { PreparationClient, contextFor } from './reader.js';
 import { PdfReader } from './pdf-reader.js';
 import { ImageReader } from './image-reader.js';
 import { importText, extractFile, words } from './documents.js';
-import { MODEL, PROMPT_VERSION, createGroqPreparer } from './groq.js';
+import { MODEL, PROMPT_VERSION } from './groq.js';
+import {normalizeConnection,createGroqPool} from './keys.js';
 import { AccountClient } from './accounts.js';
 import { SUPABASE } from './config.js';
 import { normalizeUsername, validateUsername, suggestUsernames } from './usernames.js';
@@ -16,7 +17,53 @@ let importVersion = 0, closeTimer, pinned = false, anchor = null, selectionTarge
 const account = new AccountClient(SUPABASE);
 let selectionController=null;
 const selectionCache=new Map();
-let apiKey = '', authVersion = 0, resumeScreen = 'import-screen';
+let connection=null,groqPool=null,authVersion=0,resumeScreen='import-screen';
+const quotaBudgets=new Map();
+
+function updateKeyForm(prefix,busy=false) {
+  const rows=[...$(`${prefix}-list`).querySelectorAll('.key-row')],count=rows.length;
+  document.querySelector(`[data-add-key="${prefix}"]`).disabled=busy || count>=8;
+  rows.forEach((row,index)=>{
+    const input=row.querySelector('input'),show=row.querySelector('[data-show-key]'),remove=row.querySelector('[data-remove-key]');
+    input.setAttribute('aria-label',`Groq API key ${index+1}`);
+    show.textContent=input.type==='password'?'Show':'Hide';
+    show.setAttribute('aria-label',`${show.textContent} key ${index+1}`);
+    show.setAttribute('aria-pressed',String(input.type==='text'));
+    remove.setAttribute('aria-label',`Remove key ${index+1}`);remove.disabled=busy || count===1;
+  });
+}
+
+function keyRow(prefix,input,first=false) {
+  const list=$(`${prefix}-list`),row=document.createElement('div'),show=document.createElement('button'),remove=document.createElement('button');
+  row.className='key-row'+(first?' first-key-row':'');
+  show.type='button';show.className='text-button';show.dataset.showKey='';
+  show.addEventListener('click',()=>{input.type=input.type==='password'?'text':'password';updateKeyForm(prefix);});
+  remove.type='button';remove.className='text-button';remove.textContent='Remove';
+  remove.dataset.removeKey='';
+  remove.addEventListener('click',()=>{
+    if(list.querySelectorAll('input').length===1)return;
+    if(first){
+      const next=list.querySelector('.key-row:not(.first-key-row)');
+      input.value=next.querySelector('input').value;input.type='password';next.querySelector('input').value='';next.remove();
+    }else{input.value='';row.remove();}
+    updateKeyForm(prefix);
+  });
+  row.append(input,show,remove);list.append(row);updateKeyForm(prefix);
+}
+for(const prefix of ['api-key','signup-key'])keyRow(prefix,$(prefix),true);
+
+function addKeyField(prefix,value='') {
+  if($(`${prefix}-list`).querySelectorAll('input').length>=8)return;
+  const input=document.createElement('input');
+  input.type='password';input.autocomplete='off';input.required=true;input.maxLength=512;input.spellcheck=false;input.value=value;
+  keyRow(prefix,input);return input;
+}
+for(const button of document.querySelectorAll('[data-add-key]'))button.addEventListener('click',()=>addKeyField(button.dataset.addKey)?.focus());
+
+function keyFormValue(prefix) {
+  return normalizeConnection({keys:[...$(`${prefix}-list`).querySelectorAll('input')].map(input=>input.value),independent:true});
+}
+const vaultValue=value=>value.keys.length===1?value.keys[0]:value;
 
 function authStatus(message='') {
   $('auth-status').textContent=message;$('auth-status').hidden=!message;
@@ -35,23 +82,25 @@ function authBusy(value) {
   for(const button of document.querySelectorAll('[data-auth-mode]')){
     if(button.dataset.authMode!=='key')button.disabled=value || !account.configured || !!account.user;
   }
+  for(const prefix of ['api-key','signup-key'])updateKeyForm(prefix,value);
 }
 
 function clearSecrets() {
   for(const id of ['api-key','login-password','signup-password','signup-password-confirm','signup-key'])$(id).value='';
+  for(const prefix of ['api-key','signup-key']){
+    $(prefix).type='password';
+    $(`${prefix}-list`).querySelectorAll('.key-row:not(.first-key-row)').forEach(row=>{row.querySelector('input').value='';row.remove();});
+    updateKeyForm(prefix);
+  }
   $('signup-password-confirm').setCustomValidity('');
 }
 
-function validKey(value) {
-  const key=value.trim();
-  if(!key || key.length>512 || /\s/.test(key))throw new Error('Enter a valid Groq API key.');
-  return key;
-}
-
-function connect(key,version) {
+async function connect(value,version) {
   if(version!==authVersion)return;
-  apiKey=validKey(key);service?.reset();
-  service=new PreparationClient({configured:true,model:MODEL,prompt_version:PROMPT_VERSION},createGroqPreparer(()=>apiKey),preparationChanged);
+  const normalized=normalizeConnection(value),pool=await createGroqPool(normalized,fetch,{budgets:quotaBudgets});
+  if(version!==authVersion)return;
+  connection=normalized;groqPool=pool;service?.reset();
+  service=new PreparationClient({configured:true,model:MODEL,prompt_version:PROMPT_VERSION,concurrency:pool.concurrency},pool.prepare,preparationChanged);
   clearSecrets();authStatus();notice('');
   $('session-controls').hidden=false;
   $('session-label').textContent=account.user?.username || '';
@@ -71,14 +120,14 @@ async function authenticate(event,operation) {
 }
 
 $('api-key-form').addEventListener('submit',event=>authenticate(event,async version=>{
-  const key=validKey($('api-key').value);
-  if(account.user && $('save-key').checked)await account.saveApiKey(key);
-  connect(key,version);
+  const value=keyFormValue('api-key');
+  if(account.user && $('save-key').checked)await account.saveApiKey(vaultValue(value));
+  return connect(value,version);
 }));
 $('login-form').addEventListener('submit',event=>authenticate(event,async version=>{
   const result=await account.login($('login-email').value,$('login-password').value);
   if(version!==authVersion)return;
-  if(result.apiKey)connect(result.apiKey,version);
+  if(result.apiKey)return connect(result.connection || result.apiKey,version);
   else {authMode('key');authStatus(result.vaultLocked?'The saved key could not be unlocked. Enter your Groq key to replace it.':'Enter your Groq API key.');}
 }));
 function validatePasswordConfirmation() {
@@ -88,23 +137,25 @@ for(const id of ['signup-password','signup-password-confirm'])$(id).addEventList
 $('signup-form').addEventListener('submit',event=>authenticate(event,async version=>{
   if($('signup-password').value!==$('signup-password-confirm').value)throw new Error('Passwords do not match.');
   const email=$('signup-email').value;
-  const result=await account.signUp(email,$('signup-password').value,validKey($('signup-key').value));
+  const result=await account.signUp(email,$('signup-password').value,vaultValue(keyFormValue('signup-key')));
   if(version!==authVersion)return;
   if(result.confirmationRequired){authStatus('Username accounts require email confirmation to be disabled in Supabase.');}
-  else if(result.apiKey)connect(result.apiKey,version);
+  else if(result.apiKey)return connect(result.connection || result.apiKey,version);
   else {authMode('key');authStatus('Enter your Groq API key.');}
 }));
 $('change-key').addEventListener('click',()=>{
+  const previous=connection;
   resumeScreen=screens.find(name=>name!=='auth-screen' && !$(name).hidden) || resumeScreen;
-  authVersion++;importVersion++;catalogueVersion++;service?.reset();apiKey='';hideTooltip();notice('');
+  authVersion++;importVersion++;catalogueVersion++;service?.reset();connection=null;groqPool=null;hideTooltip();notice('');
   if(!documentData || (pdfReader && !pdfReader.document)){
     documentData=null;wordElements=[];reader.replaceChildren();closePdf();
   }
   screen('auth-screen');clearSecrets();authMode('key');authBusy(false);$('api-key').focus();
+  if(previous){$('api-key').value=previous.keys[0];for(const key of previous.keys.slice(1))addKeyField('api-key',key);}
 });
 $('disconnect').addEventListener('click',()=>{
   usernameVersion++;clearTimeout(usernameTimer);$('username-suggestion').hidden=true;$('username-status').hidden=true;
-  const version=++authVersion;importVersion++;catalogueVersion++;service?.reset();service=null;apiKey='';
+  const version=++authVersion;importVersion++;catalogueVersion++;service?.reset();service=null;connection=null;groqPool=null;
   resumeScreen='import-screen';
   selectionCache.clear();documentData=null;documentName='';wordElements=[];closePdf();reader.replaceChildren();readerChrome();
   for(const id of ['paste','preview-text','file-input','login-email','signup-email'])$(id).value='';
@@ -537,19 +588,19 @@ async function translateSelection(element,start,end,selectionParagraph) {
   const controller=new AbortController();selectionController=controller;
   tooltip.classList.add('loading');$('translation-text').textContent='...';tooltip.hidden=false;position();
   owner.suspended=true;owner.manualRequest=controller;
-  if(owner.active?.waiting){owner.active.reprioritized=true;owner.active.controller.abort();}
+  owner.yieldWaiting();
   try {
     while(owner.active || Date.now()<Math.max(owner.nextAt,owner.pausedUntil)){
       await new Promise(resolve=>setTimeout(resolve,100));
       if(controller.signal.aborted)return;
     }
     const started=Date.now();
-    const response=await createGroqPreparer(()=>apiKey,fetch,{selection:true})('selection',{
+    const response=await groqPool.selection('selection',{
       body:JSON.stringify({...payload,language}),signal:controller.signal});
     const result=await response.json();
     if(controller.signal.aborted || service!==owner || $('language').value!==language)return;
     if(!response.ok){
-      if(response.status===429)owner.pausedUntil=Date.now()+(Number(response.headers.get('Retry-After'))||60)*1000;
+      if(response.status===429)owner.pausedUntil=Math.max(owner.pausedUntil,Date.now()+(Number(response.headers.get('Retry-After'))||60)*1000);
       throw new Error(result.detail);
     }
     owner.nextAt=Math.max(owner.nextAt,started+result.next_request_ms);
@@ -586,3 +637,15 @@ $('signup-email').addEventListener('input',()=>{
 });
 $('username-suggestion').addEventListener('click',()=>{$('signup-email').value=$('username-suggestion').textContent;$('signup-email').dispatchEvent(new Event('input'));});
 document.querySelector('[data-auth-mode="signup"]').addEventListener('click',checkUsername);
+
+async function restoreSignIn() {
+  const version=++authVersion;authBusy(true);authStatus('Connecting…');
+  try{
+    const result=await account.restore();
+    if(version!==authVersion)return;
+    if(result?.apiKey)await connect(result.connection || result.apiKey,version);
+    else {authMode('key');if(result)authStatus('Enter your Groq API key.');}
+  }catch(error){if(version===authVersion){authMode('login');authStatus(error.message);}}
+  finally{if(version===authVersion)authBusy(false);}
+}
+restoreSignIn();

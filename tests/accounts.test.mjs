@@ -21,6 +21,10 @@ function provider({confirmation=false,logoutError=false}={}) {
       assert.deepEqual(Object.keys(body),['candidate']);
       return response(!registered.has(body.candidate));
     }
+    if (target.pathname==='/auth/v1/token' && target.searchParams.get('grant_type')==='refresh_token') {
+      assert.ok(body.refresh_token);assert.equal(body.password,undefined);
+      return response({access_token:`token-${alice.id}`,refresh_token:'rotated-refresh-token',expires_in:3600,user:{...alice,user_metadata:metadata.get(alice.id) || {}}});
+    }
     if (target.pathname==='/auth/v1/signup' || target.pathname==='/auth/v1/token') {
       assert.ok(body.email && body.password);
       const user = body.email.startsWith('bob@') ? bob : alice;
@@ -40,6 +44,7 @@ function provider({confirmation=false,logoutError=false}={}) {
     assert.ok(user,'authenticated operations need the user bearer token');
     if (target.pathname==='/auth/v1/logout') return response(logoutError ? {message:'remote failure'} : null,logoutError ? 500 : 204);
     assert.equal(target.pathname,'/auth/v1/user');
+    if(options.method==='GET')return response({...user,user_metadata:metadata.get(user.id) || {}});
     assert.equal(options.method,'PUT');
     assert.deepEqual(Object.keys(body),['data']);
     assert.deepEqual(Object.keys(body.data),['dansk_vault']);
@@ -48,6 +53,80 @@ function provider({confirmation=false,logoutError=false}={}) {
   };
   return {fetcher,metadata,passwords,requests,registered};
 }
+
+function rememberedStorage() {
+  let record=null;
+  return {get:async()=>structuredClone(record),set:async value=>{record=structuredClone(value);},remove:async()=>{record=null;}};
+}
+
+test('remembered sign-in restores saved keys without storing password or plaintext API keys',async()=>{
+  const server=provider(),storage=rememberedStorage(),client=new AccountClient(config,server.fetcher,{storage});
+  await client.login(alice.email,password);await client.saveApiKey({keys:['gsk_secret_one','gsk_secret_two'],independent:true});
+  const record=await storage.get();assert.equal(record.key.extractable,false);
+  assert.ok(!JSON.stringify(record).includes(password));assert.ok(!JSON.stringify(record).includes('gsk_secret'));
+  const fresh=new AccountClient(config,server.fetcher,{storage});
+  assert.deepEqual((await fresh.restore()).connection,{keys:['gsk_secret_one','gsk_secret_two'],independent:true});
+  await fresh.logout();assert.equal(await storage.get(),null);
+  assert.equal(await new AccountClient(config,server.fetcher,{storage}).restore(),null);
+});
+
+test('expired remembered access tokens refresh and rotate before restoring legacy vaults',async()=>{
+  const server=provider(),storage=rememberedStorage(),client=new AccountClient(config,server.fetcher,{storage});
+  await client.login(alice.email,password);await client.saveApiKey('gsk_legacy');
+  const record=await storage.get();record.expiresAt=0;await storage.set(record);
+  const fresh=new AccountClient(config,server.fetcher,{storage});
+  assert.equal((await fresh.restore()).apiKey,'gsk_legacy');
+  assert.equal((await storage.get()).refreshToken,'rotated-refresh-token');
+  assert.ok(server.requests.some(request=>request.url.searchParams.get('grant_type')==='refresh_token'));
+});
+
+test('revoked remembered sessions are removed and cannot restore account or keys',async()=>{
+  const server=provider(),storage=rememberedStorage(),client=new AccountClient(config,server.fetcher,{storage});
+  await client.login(alice.email,password);await client.saveApiKey('gsk_secret');
+  const fresh=new AccountClient(config,async()=>response({},401),{storage});
+  await assert.rejects(fresh.restore(),/denied|sign in|session/i);
+  assert.equal(fresh.user,null);assert.equal(await storage.get(),null);
+});
+
+test('temporary account outages keep remembered credentials for the next refresh',async()=>{
+  const server=provider(),storage=rememberedStorage(),client=new AccountClient(config,server.fetcher,{storage});
+  await client.login(alice.email,password);await client.saveApiKey('gsk_secret');
+  const fresh=new AccountClient(config,async()=>response({},503),{storage});
+  await assert.rejects(fresh.restore(),/temporarily unavailable/);
+  assert.ok(await storage.get());
+  assert.equal((await new AccountClient(config,server.fetcher,{storage}).restore()).apiKey,'gsk_secret');
+});
+
+test('logout while restore is pending cannot resurrect remembered access',async()=>{
+  const server=provider(),storage=rememberedStorage(),client=new AccountClient(config,server.fetcher,{storage});
+  await client.login(alice.email,password);await client.saveApiKey('gsk_secret');
+  let release,started;
+  const gate=new Promise(resolve=>{release=resolve;}),ready=new Promise(resolve=>{started=resolve;});
+  const fresh=new AccountClient(config,async(...args)=>{started();await gate;return server.fetcher(...args);},{storage});
+  const restoring=fresh.restore();await ready;await fresh.logout();release();
+  await assert.rejects(restoring,/cancel|changed/);assert.equal(fresh.user,null);assert.equal(await storage.get(),null);
+});
+
+test('a key save waiting for refresh cannot write into a subsequently logged-in account',async()=>{
+  const server=provider(),storage=rememberedStorage();
+  const client=new AccountClient(config,async(url,options)=>{
+    const result=await server.fetcher(url,options);
+    if(url.includes('grant_type=password') && JSON.parse(options.body).email===alice.email){
+      const session=await result.json();session.expires_in=-1;return response(session);
+    }
+    return result;
+  },{storage});
+  await client.login(alice.email,password);
+  let release,started;
+  const gate=new Promise(resolve=>{release=resolve;}),ready=new Promise(resolve=>{started=resolve;});
+  const set=storage.set;let block=true;
+  storage.set=async record=>{if(block){block=false;started();await gate;}return set(record);};
+  const saving=assert.rejects(client.saveApiKey('gsk_from_previous_account'),/cancel|changed/);
+  await ready;const logout=client.logout(),login=client.login(bob.email,password);
+  for(let i=0;i<200 && client.user?.id!==bob.id;i++)await new Promise(resolve=>setTimeout(resolve,5));
+  assert.equal(client.user?.id,bob.id);release();await Promise.all([saving,logout,login]);
+  assert.ok(server.requests.every(request=>request.method!=='PUT'));
+});
 
 test('missing, privileged, or unsafe browser configuration cannot make requests',async()=>{
   const jwt = role => `eyJhbGciOiJIUzI1NiJ9.${Buffer.from(JSON.stringify({role})).toString('base64url')}.signature`;
@@ -94,7 +173,25 @@ test('encrypted vault survives a fresh login without sending plaintext to storag
   assert.equal(client.user,null);
   const fresh=new AccountClient(config,server.fetcher);
   assert.equal(fresh.user,null);
+  const before=structuredClone(server.metadata.get(alice.id)),requestCount=server.requests.length;
   assert.deepEqual(await fresh.login(alice.email,password),{user:alice,apiKey:'gsk_private_groq_key'});
+  assert.deepEqual(server.metadata.get(alice.id),before,'legacy vaults are not rewritten during login');
+  assert.ok(server.requests.slice(requestCount).every(request=>request.method!=='PUT'));
+});
+
+test('multiple keys and quota preference survive encrypted account storage and fresh login',async()=>{
+  const server=provider(),client=new AccountClient(config,server.fetcher);
+  const connection={keys:['gsk_private_one','gsk_private_two'],independent:true};
+  await client.signUp('alice',password,connection);
+  const record=server.metadata.get(alice.id).dansk_vault;
+  assert.equal(record.version,2);
+  assert.ok(!JSON.stringify(record).includes('gsk_private'));
+  await client.logout();
+  const fresh=new AccountClient(config,server.fetcher);
+  const result=await fresh.login('alice',password);
+  assert.deepEqual(result.connection,connection);assert.equal(result.apiKey,connection.keys[0]);
+  await fresh.saveApiKey({keys:['gsk_replacement'],independent:false});
+  assert.deepEqual((await fresh.login('alice',password)).connection,{keys:['gsk_replacement'],independent:false});
 });
 
 test('invalid managed-auth password cannot overwrite or unlock a saved key',async()=>{

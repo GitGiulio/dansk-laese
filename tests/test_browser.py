@@ -144,9 +144,12 @@ def test_username_signup_login_and_disconnect_keep_secrets_in_memory(browser_pag
         elif "/signup" in route.request.url:
             metadata.update(body["data"])
             assert body["email"]==user["email"]
-            route.fulfill(json={"access_token":"mock-account-session","user":{**user,"user_metadata":metadata}})
+            route.fulfill(json={"access_token":"mock-account-session","refresh_token":"mock-refresh-session","expires_in":3600,"user":{**user,"user_metadata":metadata}})
         elif "/token" in route.request.url:
-            route.fulfill(json={"access_token":"mock-account-session","user":{**user,"user_metadata":metadata}})
+            route.fulfill(json={"access_token":"mock-account-session","refresh_token":"mock-refresh-session","expires_in":3600,"user":{**user,"user_metadata":metadata}})
+        elif "/user" in route.request.url:
+            if route.request.method=='PUT':metadata.update(body['data'])
+            route.fulfill(json={**user,'user_metadata':metadata})
         elif "/logout" in route.request.url:
             route.fulfill(status=204,body="")
         else:
@@ -158,20 +161,56 @@ def test_username_signup_login_and_disconnect_keep_secrets_in_memory(browser_pag
     page.locator("#signup-password").fill("a long test password")
     page.locator("#signup-password-confirm").fill("a long test password")
     page.locator("#signup-key").fill("gsk_account_test_only")
+    page.locator('[data-add-key="signup-key"]').click()
+    page.locator('#signup-key-list .key-row:not(.first-key-row) input').fill('gsk_account_second')
+    page.screenshot(path='test-results/multiple-keys-signup.png',full_page=True)
     page.locator("#signup-form").get_by_role("button",name=re.compile("create|sign up",re.I)).click()
     page.locator("#paste").wait_for(state="visible")
     assert sum("/signup" in url for url,_body in requests)==1
     assert "gsk_account_test_only" not in json.dumps(metadata)
-    assert metadata["dansk_vault"]["version"]==1
+    assert metadata["dansk_vault"]["version"]==2
+    assert 'gsk_account_second' not in json.dumps(metadata)
+    page.locator('#paste').fill('A document that must not persist.')
+    page.reload();page.locator('#paste').wait_for(state='visible')
+    assert page.locator('#paste').input_value()==''
+    assert sum('/signup' in url for url,_body in requests)==1
+    page.evaluate("""async()=>{
+      const db=await new Promise((resolve,reject)=>{const r=indexedDB.open('dansk-reader-auth',1);r.onsuccess=()=>resolve(r.result);r.onerror=reject;});
+      await new Promise((resolve,reject)=>{
+        const tx=db.transaction('sessions','readwrite'),r=tx.objectStore('sessions').openCursor();
+        r.onsuccess=()=>{const cursor=r.result;if(cursor){const value=cursor.value;value.expiresAt=0;cursor.update(value);}};
+        tx.oncomplete=resolve;tx.onerror=reject;
+      });db.close();
+    }""")
+    page.reload();page.locator('#paste').wait_for(state='visible')
+    refreshed=[body for url,body in requests if 'grant_type=refresh_token' in url]
+    assert len(refreshed)==1 and 'password' not in refreshed[0]
     page.locator("#disconnect").click()
     page.locator('[data-auth-mode="login"]').click()
     page.locator("#login-email").fill("reader_name")
     page.locator("#login-password").fill("a long test password")
     page.locator("#login-form").get_by_role("button",name=re.compile("log in|sign in",re.I)).click()
     page.locator("#paste").wait_for(state="visible")
-    read(page,"Det er lige meget.")
+    used=[]
+    def groq(route):
+        used.append(route.request.headers['authorization'])
+        route.fulfill(json=prepared(route.request.post_data_json))
+    page.route(GROQ,groq)
+    read(page,' '.join(['Jeg','læser','dansk','hver','dag']*24))
+    assert set(used)=={'Bearer gsk_account_test_only','Bearer gsk_account_second'}
+    page.locator('#change-key').click()
+    assert page.locator('#api-key').get_attribute('type')=='password'
+    assert page.locator('#api-key-list input').count()==2
+    page.get_by_role('button',name='Remove key 2',exact=True).click()
+    page.locator('[data-add-key="api-key"]').click()
+    page.locator('#api-key-list .key-row:not(.first-key-row) input').fill('gsk_account_third')
+    used.clear()
+    page.locator('#api-key-form').get_by_role('button',name='Continue',exact=True).click()
+    ready(page)
+    assert set(used)=={'Bearer gsk_account_test_only','Bearer gsk_account_third'}
+    assert 'gsk_account_third' not in json.dumps(metadata)
     assert page.locator("#session-label").is_hidden()
-    assert page.locator("#change-key").is_hidden()
+    assert page.locator("#change-key").is_visible()
     assert page.locator("#login-password").input_value()==""
     assert page.evaluate("localStorage.length+sessionStorage.length")==0
     page.locator("#disconnect").click()
@@ -246,6 +285,28 @@ def test_username_availability_suggests_a_free_name_and_rejects_invalid_names(br
     assert page.locator("#username-suggestion").is_hidden()
 
 
+def test_manage_keys_can_reveal_and_remove_the_first_key(page):
+    page.get_by_role('button',name='Manage keys',exact=True).click()
+    page.locator('[data-add-key="api-key"]').click()
+    page.locator('#api-key-list .key-row:not(.first-key-row) input').fill('gsk_correct_key')
+    page.get_by_role('button',name='Show key 2',exact=True).click()
+    assert page.locator('#api-key-list input').nth(1).get_attribute('type')=='text'
+    page.get_by_role('button',name='Hide key 2',exact=True).click()
+    assert page.locator('#api-key-list input').nth(1).get_attribute('type')=='password'
+    page.get_by_role('button',name='Remove key 1',exact=True).click()
+    assert page.locator('#api-key-list input').count()==1
+    assert page.locator('#api-key').input_value()=='gsk_correct_key'
+    assert page.get_by_role('button',name='Remove key 1',exact=True).is_disabled()
+    used=[]
+    def provider(route):
+        used.append(route.request.headers['authorization'])
+        route.fulfill(json=prepared(route.request.post_data_json))
+    page.route(GROQ,provider)
+    page.locator('#api-key-form').get_by_role('button',name='Continue',exact=True).click()
+    read(page,'Det er lige meget.')
+    assert used==['Bearer gsk_correct_key']
+
+
 def test_change_key_reprepares_the_document_with_the_new_memory_key(page):
     headers=[]
     def provider(route):
@@ -256,7 +317,7 @@ def test_change_key_reprepares_the_document_with_the_new_memory_key(page):
     page.locator("#change-key").evaluate("el=>el.click()")
     page.locator("#api-key-form").wait_for(state="visible")
     assert page.locator("#reader-screen").is_hidden()
-    assert page.locator("#api-key").input_value()==""
+    assert page.locator("#api-key").input_value()=="gsk_browser_test_only"
     page.locator("#api-key").fill("gsk_second_browser_test")
     page.locator("#api-key-form").get_by_role("button",name="Continue",exact=True).click()
     page.locator("#reader-screen").wait_for(state="visible");ready(page)
@@ -289,7 +350,7 @@ def test_disconnect_cancels_a_pending_login_without_restoring_account_state(page
     with page.expect_request(re.compile(r"https://[^/]+\.supabase\.co/auth/v1/token\?.*")):
         page.locator("#login-form").get_by_role("button",name="Log in",exact=True).click()
     assert len(pending)==1
-    assert page.locator("#change-key").is_hidden()
+    assert page.locator("#change-key").is_disabled()
     page.locator("#disconnect").click()
     pending[0].fulfill(json={"access_token":"late-session-token","user":{
         "id":"11111111-1111-4111-8111-111111111111","email":"late_reader@usernames.danskreader.invalid","user_metadata":{},
@@ -330,7 +391,8 @@ def test_change_key_cancels_a_pending_file_import_without_reopening_preview(page
     assert page.locator("#preview-screen").is_hidden()
     assert page.locator("#reader-screen").is_hidden()
     assert page.locator("#preview-text").input_value()==""
-    assert page.locator("#api-key").input_value()==""
+    assert page.locator("#api-key").input_value()=="gsk_browser_test_only"
+    assert page.locator("#api-key").get_attribute('type')=='password'
     assert page.preparations==[]
 
 
@@ -490,7 +552,7 @@ def test_full_sentence_selection_translates_together_without_changing_hover_cach
     assert page.locator(".brand").inner_text()=="Dansk."
     assert page.locator("#reader").get_attribute("title") is None
     assert page.locator("#session-label").is_hidden()
-    assert page.locator("#change-key").is_hidden()
+    assert page.locator("#change-key").is_visible()
     select_words(page,"Det","meget")
     page.get_by_text("It doesn't matter",exact=True).wait_for()
     assert len(page.preparations)==count+1
