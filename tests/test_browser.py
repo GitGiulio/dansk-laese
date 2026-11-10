@@ -423,6 +423,17 @@ def test_document_reset_does_not_display_old_preparation(page):
     assert "OLD DOCUMENT ANSWER" not in page.locator("#reader").inner_text()
 
 
+def test_clicking_blank_text_space_keeps_the_current_scroll_position(page):
+    read(page,'\n\n'.join(f'Afsnit nummer {i}. Det er lige meget.' for i in range(40)))
+    paragraph=page.locator('#reader p').nth(20)
+    paragraph.scroll_into_view_if_needed()
+    bounds=paragraph.bounding_box();x=bounds['x']+bounds['width']-8;y=bounds['y']+bounds['height']/2
+    assert page.evaluate('([x,y])=>!document.elementFromPoint(x,y).closest(".word")',[x,y])
+    before=page.evaluate('scrollY');assert before>1000
+    page.mouse.click(x,y)
+    assert abs(page.evaluate('scrollY')-before)<2
+
+
 def test_pin_keyboard_and_safe_text(page):
     value="<img src=x onerror=alert(1)>"
     page.route(GROQ,lambda route:route.fulfill(json=prepared(route.request.post_data_json,value)))
@@ -534,6 +545,24 @@ def test_rate_limit_pauses_background_and_hovers_cannot_retry(page):
     assert page.locator("#reader").is_visible()
 
 
+def test_scroll_prioritizes_the_top_visible_chunk_after_the_active_request(page):
+    pending=[];seen=[]
+    def provider(route):
+        body=json.loads(route.request.post_data_json['messages'][1]['content']);seen.append(body)
+        if len(seen)==1:pending.append(route)
+        else:route.fulfill(json=prepared(body))
+    page.route(GROQ,provider)
+    read(page,' '.join(f'ord{i}' for i in range(300)),wait=False)
+    page.locator('#reader .word').nth(190).evaluate('word=>scrollTo(0,word.getBoundingClientRect().top+scrollY)')
+    page.wait_for_timeout(250)
+    first_visible=page.locator('#reader .word').evaluate_all('words=>words.find(word=>word.getBoundingClientRect().bottom>0).textContent')
+    pending[0].fulfill(json=prepared(pending[0].request.post_data_json))
+    ready(page)
+    assert len(seen)>1
+    next_targets={word['text'] for word in seen[1]['words'] if word['id'] in seen[1]['target_word_ids']}
+    assert first_visible in next_targets
+
+
 def test_long_context_unicode_and_new_document(page):
     read(page,"😀 "+"ord "*600+"Åse så en ø.")
     count=len(page.preparations);page.locator(".word").filter(has_text="Åse").click()
@@ -550,12 +579,15 @@ def test_mobile_layout_and_spaced_blank_paragraphs(page):
     assert page.evaluate("document.documentElement.scrollWidth<=innerWidth")
 
 
-def layout_pdf():
+def layout_pdf(lower_first=False):
     from pypdf import PdfReader,PdfWriter
     from pypdf.generic import DecodedStreamObject,NameObject
     from test_documents import pdf_bytes
     writer=PdfWriter();writer.append(PdfReader(BytesIO(pdf_bytes(["First page","Hun slog ordet op."]))))
     stream=DecodedStreamObject();stream.set_data("q 0.9 0.95 0.88 rg 30 660 540 120 re f Q\nBT /F1 24 Tf 40 750 Td (En dansk historie) Tj ET\nBT /F1 12 Tf 40 700 Td (Det er lige meget.) Tj ET\nBT /F1 12 Tf 330 700 Td (Højre kolonne.) Tj ET\nBT /F1 12 Tf 40 682 Td (Jeg har god tid.) Tj ET\nBT /F1 12 Tf 330 682 Td (En anden historie.) Tj ET".encode("cp1252"))
+    if lower_first:
+        lines=stream.get_data().splitlines()
+        stream.set_data(b'\n'.join([lines[0],lines[2],lines[1],*lines[3:]]))
     writer.pages[0][NameObject("/Contents")]=writer._add_object(stream);writer.pages[1].rotate(90)
     out=BytesIO();writer.write(out);return out.getvalue()
 
@@ -573,7 +605,7 @@ def test_original_pdf_hover_zoom_pages_and_view_switch(page):
     word=page.locator(".pdf-page .word").filter(has_text="lige");word.hover()
     assert page.locator("#tooltip").inner_text()=="It doesn't matter"
     body=next(body for body in page.preparations if "lige" in body["context"])
-    assert body["context"]=="Det er lige meget.\nJeg har god tid."
+    assert "Det er lige meget.\nJeg har god tid." in body["context"].split('\n\n')
     page.screenshot(path="test-results/pdf-reader.png",full_page=True);count=len(page.preparations)
     page.locator("#pdf-zoom").select_option("1.5")
     page.wait_for_function("()=>document.querySelector('.pdf-page')?.clientWidth===900")
@@ -588,6 +620,16 @@ def test_original_pdf_hover_zoom_pages_and_view_switch(page):
     page.locator("#reading-mode").select_option("pdf");page.locator(".pdf-page canvas").wait_for()
     page.locator("#new-document").click();read(page,"Ny tekst.")
     assert page.locator(".pdf-page").count()==0;assert page.locator("#reading-mode").is_hidden()
+
+
+def test_pdf_preparation_starts_visually_at_top_despite_content_stream_order(page):
+    seen=[]
+    def provider(route):
+        body=json.loads(route.request.post_data_json['messages'][1]['content']);seen.append(body)
+        route.fulfill(json=prepared(body))
+    page.route(GROQ,provider)
+    upload_pdf(page,layout_pdf(lower_first=True))
+    assert seen[0]['context'].startswith('En dansk historie')
 
 
 def test_pdf_current_page_prioritizes_background_preparation(page):
@@ -606,7 +648,7 @@ def test_scanned_pdf_still_displays_original_page(page):
     from test_documents import pdf_bytes
     page.locator("#file-input").set_input_files({"name":"scan.pdf","mimeType":"application/pdf","buffer":pdf_bytes([None])})
     page.locator(".pdf-page canvas").wait_for()
-    assert "OCR" in page.locator("#app-status").inner_text();assert page.locator(".pdf-page .word").count()==0
+    assert "No readable text" in page.locator("#app-status").inner_text();assert page.locator(".pdf-page .word").count()==0
 
 
 def test_pdf_fit_width_resize_and_phrase_selection(page):

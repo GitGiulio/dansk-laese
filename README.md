@@ -1,10 +1,13 @@
 # Dansk
 
 A static Danish reader with contextual English, Italian, and Polish meanings. Paste text
-or open TXT, DOCX, or PDF. PDFs keep their original appearance. Meanings prepare
+or open TXT, DOCX, PDF, PNG, JPEG, or WebP. PDFs and images keep their original appearance. Meanings prepare
 in the background; hovering shows a small translation-only box instantly when
 ready. Hovering unprepared text never sends an extra request. Selecting text and pressing
 **Translate selection** explicitly requests its full translation when needed.
+
+## GitHub Pages
+The app is available at https://gitgiulio.github.io/dansk-laese/. To use it you simply need to get a free API key from https://console.groq.com/keys. Then you can create an accout to save it or simply insert it to use it for the session. 
 
 ## Run locally on Windows
 
@@ -61,56 +64,66 @@ belongs in the app. Until this setup is applied, API-key entry works and usernam
 signup explains the missing configuration. No signup emails or SMTP are needed.
 See [`docs/accounts.md`](docs/accounts.md) for details and recovery limitations.
 
-## GitHub Pages
 
-1. Put this project in a GitHub repository. Keep `.env`, `.venv`, `test-results`,
-   `.cache`, and user documents out of commits. The included `.gitignore` covers
-   development artifacts and the private `.env`.
-2. In repository **Settings > Pages**, select **GitHub Actions** as the source.
-3. Run **Deploy Dansk to GitHub Pages** manually from the Actions tab.
-4. Complete the username account setup above.
-
-The workflow tests and builds only public assets from `static/`, then publishes
-`dist/`. It does not publish Python files, tests, documents, or `.env`. Relative
-asset and PDF-worker URLs support repository paths such as
-`https://YOUR_USER.github.io/DanskReadingApp/`. No GitHub Secrets or Groq key is
-needed for deployment. The build rejects likely embedded private credentials.
-
-```powershell
-npm run build
-npm run preview
-```
-
-You can also deploy the contents of `dist/` to any static HTTPS host. See
-[GitHub's custom Pages workflow guide](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages).
 
 ## Reading and privacy
 
 - Documents and prepared meanings stay in tab memory. Refresh or disconnect
   clears the session. No localStorage, sessionStorage, cookies, or database is
   used by the reader to persist documents or unlocked keys.
-- Preparing sends the document in chunks of up to 60 target words and 2,000
-  context characters to Groq, in the chosen language. The model is
+- Preparing sends the document in chunks of up to 48 target words with nearby
+  context (normally up to 800 characters, adjusted to fit the request budget) to Groq, in the chosen language. The model is
   `openai/gpt-oss-120b`. It handles idioms and separated expressions by source-word
   IDs. It does not guarantee every meaning is correct.
+  Short paragraphs, including OCR text blocks, share a request where possible,
+  while retaining separate source offsets and expression boundaries.
 - Prepared words and recognized expression selections have instant meanings.
   Other selections offer an explicit full-translation request (up to 2,000 context
   characters), cached in memory; a loading box appears while waiting. Click to pin, Escape to close; use arrow keys and Enter for keyboard
   reading. English, Italian, and Polish prepare and cache separately.
-- One request runs at a time, with a 15-second timeout and pacing based on token
-  usage. Errors pause preparation; **Retry** respects quota cooldowns. Reading
+- One request runs at a time. The visible page and the top visible word take
+  priority after any request already in flight. Scrolling reprioritizes queued work,
+  including chunks still waiting for token allowance.
+- The shared budget is 8,000 tokens per rolling minute. Each request reserves its
+  estimated complete JSON input plus maximum output, with a 7,200-token request
+  ceiling. Input estimates use UTF-8 bytes divided by three plus chat overhead;
+  they are estimates, not an exact model tokenizer. Actual usage replaces estimates
+  when returned, and exposed provider remaining/reset headers also constrain work.
+  Valid cached input tokens are excluded from quota accounting. There is no extra
+  per-request delay; the progress text identifies waits for token allowance.
+  Background preparation, selection requests and corrective retries share this
+  budget. Waiting is cancellable and does not count toward the 15-second HTTP
+  timeout. Other tabs and applications can also consume the provider account quota. Errors pause preparation; **Retry** respects quota cooldowns. Reading
   and cached meanings remain usable. The app never switches providers or plans. Explicit selection requests wait for
   the current background request and provider pacing, then temporarily take priority.
 - PDFs use local PDF.js canvas rendering and a selectable text layer. Page and
-  zoom controls preserve the original layout. Scans need prior OCR for meanings;
-  encrypted PDFs need an unencrypted copy. Complex column order may need a
+  zoom controls preserve the original layout. Scanned pages automatically receive
+  Danish OCR, performed locally in a bundled WebAssembly worker. Native selectable
+  PDF text is retained when usable; sparse image pages also receive recognition.
+  **Recognize page** retries OCR or handles an incomplete existing text layer.
+  Encrypted PDFs need an unencrypted copy. Complex column order may need a
   corrected **Text view**. PDF bytes stay in browser memory.
+- PNG, JPEG, and WebP images open as single-page documents with the original
+  colors/layout and transparent selectable word boxes. OCR uses Danish source text,
+  preserves paragraph/line boundaries, and feeds the existing English, Italian, or
+  Polish translation queue. Recognition uses no API key and no Groq tokens.
+  The visible page is processed first, then remaining PDF pages. Zoom reuses
+  recognized text and boxes instead of scanning again. Recognition results and
+  source pixels stay in tab memory; no external OCR service or CDN is contacted.
+- OCR can misread small, blurred, handwritten, or complex photographed text. Use
+  **Text view** and **Edit text** to correct extracted text for reading, or retry
+  with a clearer source. These edits do not rewrite the original image/PDF.
 - Imports are limited to 10 MiB. Text is limited to 200,000 characters, including
-  per-page PDF context and the complete optional PDF text view. TXT supports
+  per-page PDF/image context and the complete optional text view. Image metadata
+  above 40 million pixels or 32,767 pixels per side is rejected before decoding;
+  recognition rasters and rendered canvases have separate bounded pixel limits. TXT supports
   UTF-8, BOM-marked UTF-16, and Windows-1252 fallback. DOCX extracts text only;
   legacy `.doc` needs conversion. DOCX expanded ZIP size is limited to 50 MiB.
 - Libraries are bundled locally: Mozilla PDF.js 6.5.438 (Apache 2.0) and Mammoth
-  1.13.0 (BSD-2-Clause). Their licenses are included under `static/vendor/`.
+  1.13.0 (BSD-2-Clause). Their licenses are included under `static/vendor/`. OCR uses Tesseract.js 7.0.0,
+  its 7.0.0 WebAssembly core, and Danish model package 1.0.0 under Apache 2.0;
+  vendored archives are integrity-checked and recorded in
+  `static/vendor/tesseract/integrity.json`.
 - The running app handles your unlocked key. Trust the deployed site and your
   Supabase project administrators. Never put a Groq key or Supabase secret key
   in public configuration or a GitHub commit.

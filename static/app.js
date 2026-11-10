@@ -1,5 +1,6 @@
 import { PreparationClient, contextFor } from './reader.js';
 import { PdfReader } from './pdf-reader.js';
+import { ImageReader } from './image-reader.js';
 import { importText, extractFile, words } from './documents.js';
 import { MODEL, PROMPT_VERSION, createGroqPreparer } from './groq.js';
 import { AccountClient } from './accounts.js';
@@ -122,6 +123,7 @@ function preparationChanged() {
   position();
   progress.max=status.total || 1;progress.value=status.ready;
   $('preparation-status').textContent=status.error?`Preparation paused: ${status.error}`:
+    status.waiting?`Waiting for token allowance · ${status.ready.toLocaleString()} / ${status.total.toLocaleString()} words`:
     status.ready===status.total && !status.discovering?`Meanings ready · ${status.ready.toLocaleString()} words`:
       `Preparing meanings · ${status.ready.toLocaleString()} / ${status.total.toLocaleString()} words${status.discovering?' · reading PDF pages…':''}`;
   $('retry-preparation').hidden=!status.error || !service.config.configured;
@@ -133,7 +135,19 @@ function preparationChanged() {
 }
 
 function prepareVisible() {
-  if(documentData && service)service.prioritize(documentData.paragraphs,$('language').value);
+  if(!documentData || !service)return;
+  const paper=$('reader-paper').getBoundingClientRect();
+  let visible,top=Infinity,left=Infinity;
+  for(const word of wordElements){
+    const rect=word.getBoundingClientRect();
+    if(rect.bottom<=Math.max(0,paper.top) || rect.top>=Math.min(innerHeight,paper.bottom) || rect.right<=paper.left || rect.left>=paper.right)continue;
+    if(rect.top<top || (rect.top===top && rect.left<left)){visible=word;top=rect.top;left=rect.left;}
+    if(!reader.classList.contains('pdf-mode'))break;
+  }
+  const paragraph=visible?paragraphFor(visible):documentData.paragraphs[0];
+  const index=documentData.paragraphs.indexOf(paragraph);
+  const ordered=index>0?[...documentData.paragraphs.slice(index),...documentData.paragraphs.slice(0,index)]:documentData.paragraphs;
+  service.prioritize(ordered,$('language').value,paragraph?{paragraph,start:Number(visible?.dataset.start || 0)}:null);
 }
 
 async function queuePdfPages(viewer=pdfReader) {
@@ -209,7 +223,6 @@ function lookup(element,start,end,keepOpen=false) {
     $('translation-text').textContent='...';tooltip.classList.add('loading');tooltip.hidden=false;position();return;
   }
   $('translation-text').textContent=result.translation;tooltip.hidden=false;
-  if(result.uncertain)notice('This meaning is tentative because the context may be insufficient.');
   for(const word of reader.querySelectorAll(`.word[data-paragraph="${paragraph.id}"]`)){
     if(result.highlights.some(h=>Number(word.dataset.start)===h.start && Number(word.dataset.end)===h.end))word.classList.add('active');
   }
@@ -244,12 +257,15 @@ function render() {
   readerChrome();
   $('document-meta').textContent = `${documentName || 'Pasted text'} · ${wordElements.length.toLocaleString()} words · Danish`;
   screen('reader-screen');
-  prepareVisible();
   window.scrollTo(0,0);
+  prepareVisible();
 }
 
 function readerChrome() {
   const original = pdfReader && $('reading-mode').value==='pdf';
+  const image=pdfReader instanceof ImageReader;
+  $('reading-mode').options[0].textContent=image?'Original image':'Original PDF';
+  $('pdf-controls').querySelector('.page-controls').hidden=image;
   $('reading-mode-control').hidden=!pdfReader;
   $('font-size-control').hidden=!!original;
   $('edit-document').hidden=!!original;
@@ -261,6 +277,7 @@ function readerChrome() {
 
 async function closePdf() {
   catalogueVersion++;
+  $('ocr-status').textContent='';$('ocr-status').hidden=true;
   const previous=pdfReader;pdfReader=null;pdfTextData=null;
   if(previous)await previous.destroy().catch(()=>{});
 }
@@ -270,7 +287,7 @@ async function showPdfPage(number=pdfReader?.page || 1) {
   if(!viewer?.document || $('reading-mode').value!=='pdf')return;
   const version=++importVersion;
   number=Math.max(1,Math.min(viewer.document.numPages,Math.trunc(Number(number))||1));
-  hideTooltip();$('selection-translate').hidden=true;notice('Loading PDF page…');
+  hideTooltip();$('selection-translate').hidden=true;notice('Loading page…');
   try {
     const result=await viewer.show(number,$('pdf-zoom').value,$('reader-paper').clientWidth,text=>importRequest(text));
     if(!result || version!==importVersion || viewer!==pdfReader)return;
@@ -284,7 +301,8 @@ async function showPdfPage(number=pdfReader?.page || 1) {
     $('pdf-previous').disabled=number===1;
     $('pdf-next').disabled=number===viewer.document.numPages;
     $('document-meta').textContent=documentName;
-    notice(wordElements.length?'':'This page has no selectable text. Scanned pages need OCR for translation.');
+    const warnings=result.warnings || result.data.warnings || [];
+    notice(warnings.join(' ') || (wordElements.length?'':'No readable text was found on this page. Try recognizing it again.'));
     prepareVisible();
   } catch(error) {
     if(version!==importVersion || viewer!==pdfReader)return;
@@ -293,10 +311,15 @@ async function showPdfPage(number=pdfReader?.page || 1) {
 }
 
 async function openPdf(file) {
-  const version=++importVersion;busy(true);hideTooltip();notice('Opening PDF…');
+  const image=/\.(png|jpe?g|webp)$/i.test(file.name);
+  const version=++importVersion;busy(true);hideTooltip();notice(image?'Opening image…':'Opening PDF…');
   await closePdf();
   if(version!==importVersion)return;
-  const viewer=new PdfReader(file);pdfReader=viewer;documentName=file.name;
+  const Viewer=image?ImageReader:PdfReader;
+  const viewer=new Viewer(file,{onProgress:message=>{
+    if(viewer!==pdfReader)return;
+    $('ocr-status').textContent=message;$('ocr-status').hidden=!message;
+  }});pdfReader=viewer;documentName=file.name;
   try {
     await viewer.open();
     if(version!==importVersion || viewer!==pdfReader)return;
@@ -308,7 +331,7 @@ async function openPdf(file) {
   } catch(error) {
     if(viewer!==pdfReader || viewer.destroyed)return;
     await closePdf();readerChrome();screen('import-screen');
-    notice(error.name==='PasswordException'?'This PDF is encrypted. Open an unencrypted copy instead.':'Could not open this PDF. It may be damaged or use an unsupported format.',true);
+    notice(error.name==='PasswordException'?'This PDF is encrypted. Open an unencrypted copy instead.':image?(error.message || 'Could not open this image. Choose a PNG, JPEG or WebP file.'):'Could not open this PDF. It may be damaged or use an unsupported format.',true);
   } finally {busy(false);}
 }
 
@@ -316,6 +339,19 @@ $('pdf-previous').addEventListener('click',()=>showPdfPage(pdfReader.page-1));
 $('pdf-next').addEventListener('click',()=>showPdfPage(pdfReader.page+1));
 $('pdf-page').addEventListener('change',event=>showPdfPage(event.target.value));
 $('pdf-zoom').addEventListener('change',()=>showPdfPage());
+$('recognize-page').addEventListener('click',async()=>{
+  const viewer=pdfReader,number=viewer?.page;
+  if(!viewer?.document)return;
+  const version=++importVersion;hideTooltip();$('recognize-page').disabled=true;notice('');
+  try{
+    await viewer.forceOcr(number,text=>importRequest(text));
+    if(viewer!==pdfReader || version!==importVersion)return;
+    pdfTextData=null;
+    await showPdfPage(number);
+    if(viewer===pdfReader)queuePdfPages(viewer);
+  }catch(error){if(viewer===pdfReader && version===importVersion)notice(error.message || 'Recognition failed. Try again.',true);}
+  finally{$('recognize-page').disabled=false;}
+});
 $('reading-mode').addEventListener('change',async()=>{
   hideTooltip();$('selection-translate').hidden=true;
   if($('reading-mode').value==='pdf'){readerChrome();await showPdfPage();return;}
@@ -370,7 +406,7 @@ $('file-input').addEventListener('change',event => {
   if (!file) return;
   if (file.size > 10*1024*1024) {notice('Choose a file no bigger than 10 MiB.',true);event.target.value='';return;}
   const data = new FormData();data.append('file',file);
-  if(file.name.toLowerCase().endsWith('.pdf'))openPdf(file);
+  if(/\.(pdf|png|jpe?g|webp)$/i.test(file.name))openPdf(file);
   else prepare(data,file.name,true);
   event.target.value = '';
 });
@@ -428,7 +464,7 @@ reader.addEventListener('click',event => {
   const word=event.target.closest('.word');
   if(word && window.getSelection().isCollapsed)lookupWord(word,true);
 });
-reader.addEventListener('focus',() => {wordElements[0]?.focus();});
+reader.addEventListener('focus',() => {wordElements[0]?.focus({preventScroll:true});});
 reader.addEventListener('keydown',event => {
   const word=event.target.closest('.word');
   if(!word)return;
@@ -476,7 +512,11 @@ $('selection-translate').addEventListener('click',() => {
 document.addEventListener('pointerdown',event => {
   if(!tooltip.contains(event.target) && !reader.contains(event.target) && event.target!==$('selection-translate'))hideTooltip();
 });
-function scrollTranslation() { $('selection-translate').hidden=true;if(pinned)position();else hideTooltip(); }
+let visibleTimer;
+function scrollTranslation() {
+  $('selection-translate').hidden=true;if(pinned)position();else hideTooltip();
+  clearTimeout(visibleTimer);visibleTimer=setTimeout(()=>{if(!$('reader-screen').hidden)prepareVisible();},180);
+}
 window.addEventListener('scroll',scrollTranslation,{passive:true});
 $('reader-paper').addEventListener('scroll',scrollTranslation,{passive:true});
 window.addEventListener('resize',() => {
@@ -497,6 +537,7 @@ async function translateSelection(element,start,end,selectionParagraph) {
   const controller=new AbortController();selectionController=controller;
   tooltip.classList.add('loading');$('translation-text').textContent='...';tooltip.hidden=false;position();
   owner.suspended=true;owner.manualRequest=controller;
+  if(owner.active?.waiting){owner.active.reprioritized=true;owner.active.controller.abort();}
   try {
     while(owner.active || Date.now()<Math.max(owner.nextAt,owner.pausedUntil)){
       await new Promise(resolve=>setTimeout(resolve,100));
@@ -504,7 +545,7 @@ async function translateSelection(element,start,end,selectionParagraph) {
     }
     const started=Date.now();
     const response=await createGroqPreparer(()=>apiKey,fetch,{selection:true})('selection',{
-      body:JSON.stringify({...payload,language}),signal:AbortSignal.any([controller.signal,AbortSignal.timeout(15000)])});
+      body:JSON.stringify({...payload,language}),signal:controller.signal});
     const result=await response.json();
     if(controller.signal.aborted || service!==owner || $('language').value!==language)return;
     if(!response.ok){

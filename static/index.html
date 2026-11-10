@@ -62,7 +62,7 @@
           <button type="submit" id="prepare" class="primary full">Preview</button>
         </form>
         <div class="divider">or</div>
-        <label class="file-drop" for="file-input"><strong>Open a file ↑</strong><span>TXT, DOCX, PDF · up to 10 MiB</span><input id="file-input" type="file" accept=".txt,.docx,.pdf"></label>
+        <label class="file-drop" for="file-input"><strong>Open a file ↑</strong><span>TXT, DOCX, PDF, images · up to 10 MiB</span><input id="file-input" type="file" accept=".txt,.docx,.pdf,.png,.jpg,.jpeg,.webp"></label>
       </div>
     </section>
     <section id="preview-screen" class="preview-layout" hidden aria-labelledby="preview-heading">
@@ -76,7 +76,7 @@
         <div><h1 id="reader-title">Read<span class="accent">.</span></h1><p id="document-meta"></p></div>
         <div class="reader-controls"><label id="reading-mode-control" for="reading-mode" hidden>View<select id="reading-mode"><option value="pdf">Original PDF</option><option value="text">Text view</option></select></label><label for="language">Translation<select id="language"><option value="en">English</option><option value="it">Italiano</option><option value="pl">Polski</option></select></label><label id="font-size-control" for="font-size">Text size<input id="font-size" type="range" min="18" max="32" value="23"></label><button id="edit-document" class="secondary">Edit text</button><button id="new-document" class="secondary">New text</button></div>
       </div>
-      <div id="pdf-controls" class="pdf-controls" hidden><div class="page-controls"><button id="pdf-previous" class="secondary" aria-label="Previous page">←</button><label for="pdf-page">Page <input id="pdf-page" type="number" min="1" value="1"></label><span id="pdf-page-count"></span><button id="pdf-next" class="secondary" aria-label="Next page">→</button></div><label for="pdf-zoom">Zoom<select id="pdf-zoom"><option value="fit">Fit width</option><option value="1">100%</option><option value="1.5">150%</option><option value="2">200%</option></select></label></div>
+      <div id="pdf-controls" class="pdf-controls" hidden><div class="page-controls"><button id="pdf-previous" class="secondary" aria-label="Previous page">←</button><label for="pdf-page">Page <input id="pdf-page" type="number" min="1" value="1"></label><span id="pdf-page-count"></span><button id="pdf-next" class="secondary" aria-label="Next page">→</button></div><span id="ocr-status" role="status" hidden></span><button id="recognize-page" class="secondary">Recognize page</button><label for="pdf-zoom">Zoom<select id="pdf-zoom"><option value="fit">Fit width</option><option value="1">100%</option><option value="1.5">150%</option><option value="2">200%</option></select></label></div>
       <div class="preparation-strip"><progress id="preparation-progress" value="0" max="1" aria-label="Translation preparation"></progress><span id="preparation-status" role="status"></span><button id="retry-preparation" class="text-button" hidden>Retry</button></div>
       <p id="lookup-status" class="lookup-status" role="status" hidden></p>
       <div id="reader-paper" class="reader-paper"><article id="reader" lang="da" aria-label="Danish text" tabindex="0"></article><div id="end-mark" hidden></div></div>

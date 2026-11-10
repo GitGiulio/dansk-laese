@@ -1,4 +1,14 @@
+import { importText as parseText } from './documents.js';
+
 const clean = text => text.normalize('NFC').replace(/\u00ad/g,'').replace(/[\r\n]+/g,' ');
+const emptyData = warnings => ({text:'',paragraphs:[],warnings});
+const textWords = text => text.match(/[\p{L}\p{N}]+/gu) || [];
+
+export function pdfNeedsOcr(text,hasImage=false) {
+  const count=textWords(text).length;
+  // ponytail: sparse image pages use OCR; manual recognition covers incomplete larger text layers.
+  return count===0 || (hasImage && count<12);
+}
 
 export function pdfTextBlocks(items) {
   const pieces = items.flatMap((item,itemIndex) => {
@@ -66,9 +76,11 @@ async function pdfLibrary() {
 }
 
 export class PdfReader {
-  constructor(file) {
+  constructor(file,{onProgress=()=>{}}={}) {
     this.file=file;this.document=null;this.loading=null;this.renderTask=null;this.textLayer=null;
     this.pages=new Map();
+    this.onProgress=onProgress;this.ocrEngine=null;this.ocrReady=null;this.ocrRenderTasks=new Set();
+    this.ocrQueue=new Map();this.ocrActive=null;this.ocrCanvas=null;this.requestedPage=1;
     this.page=1;this.version=0;this.destroyed=false;
   }
 
@@ -92,12 +104,86 @@ export class PdfReader {
     return {...raw,items:raw.items.map(item=>typeof item.str==='string'?{...item,str:clean(item.str)}:item)};
   }
 
-  async pageData(number,importText) {
+  async recognizePage(page,importText) {
+    if(this.destroyed)throw new Error('PDF closed.');
+    this.onProgress('Recognizing PDF page…');
+    this.ocrReady ??= import('./ocr.js').then(({OcrEngine})=>{
+      if(this.destroyed)throw new Error('PDF closed.');
+      return this.ocrEngine=new OcrEngine(this.onProgress);
+    });
+    const engine=await this.ocrReady;
+    if(this.destroyed)throw new Error('PDF closed.');
+    const base=page.getViewport({scale:1});
+    const scale=Math.min(2.5,3000/Math.max(base.width,base.height),Math.sqrt(6000000/(base.width*base.height)));
+    const viewport=page.getViewport({scale});
+    const canvas=document.createElement('canvas');
+    this.ocrCanvas=canvas;
+    canvas.width=Math.max(1,Math.floor(viewport.width));canvas.height=Math.max(1,Math.floor(viewport.height));
+    let task;
+    try {
+      task=page.render({canvasContext:canvas.getContext('2d'),viewport,background:'rgb(255,255,255)'});
+      this.ocrRenderTasks.add(task);
+      await task.promise;
+      if(this.destroyed)throw new Error('PDF closed.');
+      const result=await engine.recognize(canvas,importText);
+      if(this.destroyed)throw new Error('PDF closed.');
+      return result;
+    } finally {
+      this.ocrRenderTasks.delete(task);
+      canvas.width=canvas.height=0;
+      if(this.ocrCanvas===canvas)this.ocrCanvas=null;
+    }
+  }
+
+  queueOcr(number,page,importText) {
+    if(this.destroyed)return Promise.reject(new Error('PDF closed.'));
+    if(this.ocrActive?.number===number)return this.ocrActive.promise;
+    if(this.ocrQueue.has(number))return this.ocrQueue.get(number).promise;
+    let resolve,reject;
+    const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});
+    this.ocrQueue.set(number,{number,page,importText,promise,resolve,reject});
+    this.pumpOcr();
+    return promise;
+  }
+
+  async pumpOcr() {
+    if(this.destroyed || this.ocrActive)return;
+    const job=this.ocrQueue.get(this.requestedPage) || this.ocrQueue.values().next().value;
+    if(!job)return;
+    this.ocrQueue.delete(job.number);this.ocrActive=job;
+    try {job.resolve(await this.recognizePage(job.page,job.importText));}
+    catch(error) {job.reject(error);}
+    finally {
+      if(this.ocrActive===job)this.ocrActive=null;
+      this.pumpOcr();
+    }
+  }
+
+  async pageData(number,importText=parseText,force=false) {
+    if(this.destroyed)throw new Error('PDF closed.');
+    if(force)this.pages.delete(number);
     if(!this.pages.has(number)){
       const pending=(async()=>{
-        const content=await this.content(await this.document.getPage(number));
+        const page=await this.document.getPage(number);
+        const content=await this.content(page);
+        if(this.destroyed)throw new Error('PDF closed.');
         const blocks=pdfTextBlocks(content.items),text=blocks.map(block=>block.text).join('\n\n');
-        const data=text?await importText(text):{text:'',paragraphs:[],warnings:[]};
+        let hasImage=false;
+        if(!force && textWords(text).length>0 && textWords(text).length<12) {
+          const {OPS}=await pdfLibrary(),operators=await page.getOperatorList();
+          hasImage=operators.fnArray.some(op=>[OPS.paintImageXObject,OPS.paintInlineImageXObject,OPS.paintImageMaskXObject,
+            OPS.paintImageXObjectRepeat,OPS.paintImageMaskXObjectRepeat,OPS.paintImageMaskXObjectGroup].includes(op));
+        }
+        if(force || pdfNeedsOcr(text,hasImage)) {
+          try {
+            const ocr=await this.queueOcr(number,page,importText);
+            return {content,blocks:[],data:ocr.data,ocr};
+          } catch(error) {
+            if(this.destroyed)throw error;
+            return {content,blocks:[],data:emptyData(['Could not recognize this PDF page. Use Recognize page to retry.']),ocr:null,ocrFailed:true};
+          }
+        }
+        const data=text?await importText(text):emptyData([]);
         if(this.destroyed)throw new Error('PDF closed.');
         return {content,blocks,data};
       })();
@@ -107,7 +193,14 @@ export class PdfReader {
     return this.pages.get(number);
   }
 
+  async forceOcr(number,importText=parseText) {
+    this.requestedPage=number;
+    this.version++;this.renderTask?.cancel();this.textLayer?.cancel();
+    return this.pageData(number,importText,true);
+  }
+
   async show(number,zoom,availableWidth,importText) {
+    this.requestedPage=number;
     const version=++this.version;
     this.renderTask?.cancel();this.textLayer?.cancel();
     const pdfjs=await pdfLibrary();
@@ -115,7 +208,7 @@ export class PdfReader {
     const base=page.getViewport({scale:1});
     const scale=zoom==='fit'?Math.max(.1,(availableWidth-2)/base.width):Number(zoom);
     const viewport=page.getViewport({scale});
-    const {content,blocks,data}=await this.pageData(number,importText);
+    const {content,blocks,data,ocr}=await this.pageData(number,importText);
     if(this.destroyed || version!==this.version)return null;
     const element=document.createElement('div');element.className='pdf-page';
     element.style.width=`${viewport.width}px`;element.style.height=`${viewport.height}px`;
@@ -128,13 +221,23 @@ export class PdfReader {
     canvas.width=Math.ceil(viewport.width*density);canvas.height=Math.ceil(viewport.height*density);
     canvas.style.width=`${viewport.width}px`;canvas.style.height=`${viewport.height}px`;
     element.append(canvas);
-    const layer=document.createElement('div');layer.className='textLayer';element.append(layer);
     this.renderTask=page.render({canvasContext:canvas.getContext('2d'),viewport,
       transform:density===1?null:[density,0,0,density,0,0]});
-    this.textLayer=new pdfjs.TextLayer({textContentSource:content,container:layer,viewport});
-    try { await Promise.all([this.renderTask.promise,this.textLayer.render()]); }
+    this.textLayer=null;
+    if(!ocr) {
+      const layer=document.createElement('div');layer.className='textLayer';element.append(layer);
+      this.textLayer=new pdfjs.TextLayer({textContentSource:content,container:layer,viewport});
+    }
+    try { await Promise.all([this.renderTask.promise,this.textLayer?.render()]); }
     catch(error) {if(this.destroyed || version!==this.version)return null;throw error;}
     if(this.destroyed || version!==this.version)return null;
+    if(ocr) {
+      const {renderOcrLayer}=await import('./ocr.js');
+      if(this.destroyed || version!==this.version)return null;
+      element.append(renderOcrLayer(ocr,viewport.width,viewport.height));
+      this.page=number;
+      return {element,data};
+    }
     const divs=this.textLayer.textDivs;
     const divByItem=new Map();let divIndex=0;
     content.items.forEach((item,index)=>{if(typeof item.str==='string')divByItem.set(index,divs[divIndex++]);});
@@ -161,24 +264,31 @@ export class PdfReader {
     return {element,data};
   }
 
-  async extractedText() {
+  async extractedText(importText=parseText) {
     const parts=[];let length=0;
     for(let number=1;number<=this.document.numPages;number++) {
       if(this.destroyed)throw new Error('PDF closed.');
-      const content=await this.content(await this.document.getPage(number));
-      const text=pdfTextBlocks(content.items).map(block=>block.text).join('\n\n');
+      const {data}=await this.pageData(number,importText);
+      const text=data.text;
       length+=Array.from(text).length+2;
       if(length>200000)throw new Error('Text view is limited to 200,000 characters. Continue using the original PDF view.');
       if(text)parts.push(text);
     }
-    if(!parts.length)throw new Error('This PDF has no selectable text. OCR is needed for translation.');
+    if(!parts.length)throw new Error('No text was recognized in this PDF. Try Recognize page or choose a clearer scan.');
     return parts.join('\n\n');
   }
 
   async destroy() {
     this.destroyed=true;this.version++;
     this.renderTask?.cancel();this.textLayer?.cancel();
-    await this.loading?.destroy();
+    const error=new Error('PDF closed.');
+    this.ocrActive?.reject(error);
+    for(const job of this.ocrQueue.values())job.reject(error);
+    this.ocrQueue.clear();this.ocrActive=null;
+    for(const task of this.ocrRenderTasks)task.cancel();
+    if(this.ocrCanvas){this.ocrCanvas.width=this.ocrCanvas.height=0;this.ocrCanvas=null;}
+    await Promise.allSettled([this.loading?.destroy(),this.ocrEngine?.destroy()]);
+    this.ocrRenderTasks.clear();this.ocrEngine=null;
     this.pages.clear();
     this.file=null;this.document=null;
   }
