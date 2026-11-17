@@ -17,18 +17,19 @@ AES-GCM encrypted key in Supabase's native user metadata, deriving its encryptio
 key from the account password with WebCrypto PBKDF2. A private username registry and boolean availability RPC
 require the supplied SQL setup. Keep passwords, tokens and unlocked keys in memory only. Encrypted
 metadata is submitted with signup, with email confirmation disabled for internal username identifiers.
-Password resets require reentering the Groq key.
+Password resets require reentering the translation API keys.
 
 Browser runtime: local JS text extraction/normalization and source validation;
-Mammoth raw DOCX text with zip expansion guard; direct HTTPS Groq preparation using
-the user's memory-held key. No FastAPI endpoints, .env or Python required to use
+Mammoth raw DOCX text with zip expansion guard; direct HTTPS preparation with the
+reader's personal Groq or Gemini key. No FastAPI endpoints, .env or Python required to use
 the deployed app. Retain Python tools/tests as development/evaluation references.
 All imports, PDF workers and resource URLs resolve relative to the app's location.
 
 Deploy: build only static/ into dist/, rejecting accidentally embedded keys.
 Provide manual GitHub Pages workflow and static preview instructions. Never publish
 .env, user documents, Python files, test outputs or private credentials. Supabase
-project URL and publishable key are public configuration, not Groq credentials.
+project URL and publishable key are public configuration. Translation credentials
+are entered by the reader.
 
 Verification: Node contracts, mocked static browser tests at a repository-style
 URL prefix, no API/local-server calls, DOCX/PDF imports, key clearing on refresh,

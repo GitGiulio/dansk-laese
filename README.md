@@ -7,7 +7,8 @@ ready. Hovering unprepared text never sends an extra request. Selecting text and
 **Translate selection** explicitly requests its full translation when needed.
 
 ## GitHub Pages
-The app is available at https://gitgiulio.github.io/dansk-laese/. To use it you simply need to get a free API key from https://console.groq.com/keys. Then you can create an accout to save it or simply insert it to use it for the session. 
+The app is available on [GitHub Pages](https://gitgiulio.github.io/dansk-laese/).
+Use a personal API key for the current tab or create an account to save it encrypted.
 
 ## Run locally on Windows
 
@@ -41,29 +42,38 @@ retrying `npm run dev`. The Node runtime bundled with Codex is available to the
 agent's tools but does not install Node for your normal terminal.
 
 Choose **API key** for a one-tab session, **Log in**, or **Create account**.
-Get a key from [Groq Console](https://console.groq.com/keys). The browser calls
-Groq directly with your key. This version does not read `.env`; your existing
-private file is kept for optional Python evaluation tools only.
+Get a personal key from [Groq Console](https://console.groq.com/keys) or
+[Google AI Studio](https://aistudio.google.com/api-keys). The browser calls the
+selected provider directly. The optional Python tools use `.env` separately.
 Use **Add key** to enter up to eight masked keys, and **Manage keys** to edit them
-later. **Show/Hide** reveals a key for identification; **Remove** deletes a row.
+later. The list can include one Gemini key. Pick the provider if the app cannot
+identify a key’s format. **Show/Hide** reveals a key for identification and
+**Remove** deletes a row.
 Press **Continue**, with **Save encrypted keys to my account** checked, to save
 the updated list. At least one key is required to continue reading.
-All configured keys are assumed to have independent quotas and can prepare
-concurrently, with one token budget per key.
+Gemini is selected by default when present. To use Groq in a mixed connection,
+choose it under **Translation provider** in **Manage keys**. This choice applies
+to the current session.
+
+Your Google project controls Gemini quota and any charges. Projects on the
+Gemini Free Tier have limited access to eligible models. Usage on a paid project
+can incur charges for the same models. Google’s terms specify additional conditions
+for apps made available to users in the EEA, Switzerland, and the UK.
+[Gemini billing](https://aistudio.google.com/docs/billing) · [Gemini API terms](https://aistudio.google.com/docs/terms#use-restrictions)
 
 ## Accounts
 
 Readers choose a unique username and password; no email address is requested.
 Names use 3 to 24 letters, digits or underscores and are case insensitive. Signup
 checks availability and offers a clickable small variation when a name is taken.
-Supabase still manages passwords and stores only the encrypted Groq keys and
-legacy quota preference. Existing accounts and single-key vaults remain valid without
+Supabase manages passwords and stores the encrypted API-key list, any manual key
+classifications, and the legacy quota preference. Existing accounts and single-key vaults remain valid without
 migration or changes to the Supabase setup. Multi-key vaults use a new encrypted
 format only when saved; login never rewrites an existing vault.
 
 Account sign-in survives refresh and browser reopening. IndexedDB remembers the
 Supabase access/refresh tokens and a non-exportable vault-unlocking CryptoKey,
-without saving the password or plaintext Groq keys. The app verifies the account
+without saving the password or plaintext API keys. The app verifies the account
 with Supabase on restoration and refreshes expired tokens. **Log out** removes
 the remembered session, including when the remote logout request fails. Existing
 users only need to log in once after this update; no account migration is needed.
@@ -89,21 +99,20 @@ See [`docs/accounts.md`](docs/accounts.md) for details and recovery limitations.
   translations, passwords and plaintext API keys are never written there.
   Direct API-key entry without an account remains limited to the current tab.
 - Preparing sends the document in chunks of up to 48 target words with nearby
-  context (normally up to 800 characters, adjusted to fit the request budget) to Groq, in the chosen language. The model is
-  `openai/gpt-oss-120b`. It handles idioms and separated expressions by source-word
-  IDs. It does not guarantee every meaning is correct.
+  context (normally up to 800 characters, adjusted to fit the request budget) to the
+  selected provider. Both providers use source-word IDs for idioms and separated expressions.
   Short paragraphs, including OCR text blocks, share a request where possible,
   while retaining separate source offsets and expression boundaries.
 - Prepared words and recognized expression selections have instant meanings.
   Other selections offer an explicit full-translation request (up to 2,000 context
   characters), cached in memory; a loading box appears while waiting. Click to pin, Escape to close; use arrow keys and Enter for keyboard
   reading. English, Italian, and Polish prepare and cache separately.
-- All configured keys can prepare concurrently, up to eight requests at a time.
+- Groq uses `openai/gpt-oss-120b` and can prepare concurrently with one request per key.
   Explicit selections wait for active preparation and then take priority.
   The visible page and the top visible word take
   priority after any request already in flight. Scrolling reprioritizes queued work,
   including chunks still waiting for token allowance.
-- Each key has its own budget of 8,000 tokens per rolling minute. Budget state
+- Each Groq key has its own budget of 8,000 tokens per rolling minute. Budget state
   survives key editing and document changes, indexed by key fingerprints rather
   than retained plaintext credentials. Each request reserves its
   estimated complete JSON input plus maximum output, with a 7,200-token request
@@ -114,9 +123,12 @@ See [`docs/accounts.md`](docs/accounts.md) for details and recovery limitations.
   per-request delay; the progress text identifies waits for token allowance.
   Background preparation, selection requests and corrective retries share this
   budget. Waiting is cancellable and does not count toward the 15-second HTTP
-  timeout. Other tabs and applications can also consume the provider account quota. Errors pause preparation; **Retry** respects quota cooldowns. Reading
-  and cached meanings remain usable. The app never switches providers or plans. Explicit selection requests wait for
-  the current background request and provider pacing, then temporarily take priority.
+  timeout. Other tabs and applications can also consume the provider account quota.
+- Gemini prepares one batch at a time. Its starting model is `gemini-4-hydrogen`,
+  followed by `gemini-3.8-flash` and `gemini-3.1-flash-lite` on model-level quota
+  errors, all using the same personal key. A model becomes eligible again when
+  its cooldown expires. If the available models are limited, the reader shows
+  when to retry. Reading and cached meanings remain usable while preparation is paused.
 - PDFs use local PDF.js canvas rendering and a selectable text layer. Page and
   zoom controls preserve the original layout. Scanned pages automatically receive
   Danish OCR, performed locally in a bundled WebAssembly worker. Native selectable
@@ -127,7 +139,7 @@ See [`docs/accounts.md`](docs/accounts.md) for details and recovery limitations.
 - PNG, JPEG, and WebP images open as single-page documents with the original
   colors/layout and transparent selectable word boxes. OCR uses Danish source text,
   preserves paragraph/line boundaries, and feeds the existing English, Italian, or
-  Polish translation queue. Recognition uses no API key and no Groq tokens.
+  Polish translation queue. Recognition runs locally without API usage.
   The visible page is processed first, then remaining PDF pages. Zoom reuses
   recognized text and boxes instead of scanning again. Recognition results and
   source pixels stay in tab memory; no external OCR service or CDN is contacted.
@@ -146,8 +158,8 @@ See [`docs/accounts.md`](docs/accounts.md) for details and recovery limitations.
   vendored archives are integrity-checked and recorded in
   `static/vendor/tesseract/integrity.json`.
 - The running app handles your unlocked key. Trust the deployed site and your
-  Supabase project administrators. Never put a Groq key or Supabase secret key
-  in public configuration or a GitHub commit.
+  Supabase project administrators. Keep API secrets out of public configuration
+  and GitHub commits.
 
 ## Verification
 
@@ -161,7 +173,7 @@ uv run pytest tests/test_browser.py -q
 
 The Python tools are optional development dependencies. Browser checks use an
 installed Chrome (`BROWSER_EXECUTABLE` can override its path), a static server
-under a repository-style prefix, and mocked Groq/Supabase responses. They never
+under a repository-style prefix, and mocked Groq, Gemini, and Supabase responses. They never
 use your key, create real accounts, or send email. Screenshots go in ignored
 `test-results/`. No real GitHub Pages deployment is performed by the tests.
 
@@ -174,8 +186,12 @@ uv run --env-file .env python evaluate.py --live
 
 This sends real requests using `.env` and writes `evaluation-results.json` for
 manual semantic review. Passing software tests does not establish Danish
-translation quality. The full 24-lookup quality evaluation has not been run for
-this conversion; no provider or model has been changed.
+translation quality. Gemini’s model ranking is an initial default. To smoke-test
+the live Gemini connection, open the local static preview, enter a personal
+AI Studio key, and read a short sample passage. The browser’s Network panel should
+show a successful model-list check and a structured Interactions response.
+Use the passages in [`evaluation/cases.json`](evaluation/cases.json) to review
+idioms and source-word coverage across models before changing the ranking.
 
 The schema-error fix was checked against a live 57-word English preparation:
 all target words were covered and no blank translations were accepted. Requests

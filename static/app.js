@@ -2,8 +2,9 @@ import { PreparationClient, contextFor } from './reader.js';
 import { PdfReader } from './pdf-reader.js';
 import { ImageReader } from './image-reader.js';
 import { importText, extractFile, words } from './documents.js';
-import { MODEL, PROMPT_VERSION } from './groq.js';
-import {normalizeConnection,createGroqPool} from './keys.js';
+import {PROMPT_VERSION} from './translation.js';
+import {checkGeminiKey} from './gemini.js';
+import {normalizeConnection,keyProvider,connectionKeys,createTranslationPool} from './keys.js';
 import { AccountClient } from './accounts.js';
 import { SUPABASE } from './config.js';
 import { normalizeUsername, validateUsername, suggestUsernames } from './usernames.js';
@@ -11,30 +12,43 @@ import { normalizeUsername, validateUsername, suggestUsernames } from './usernam
 const $ = id => document.getElementById(id);
 const screens = ['auth-screen','import-screen','preview-screen','reader-screen'];
 const reader = $('reader'), tooltip = $('tooltip');
+const selectionActions = $('selection-actions'), highlightColors = document.querySelector('.highlight-colors');
+const highlights = new WeakMap();
 let documentData = null, documentName = '', wordElements = [], service;
 let pdfReader = null, pdfTextData = null, resizeTimer, catalogueVersion=0;
 let importVersion = 0, closeTimer, pinned = false, anchor = null, selectionTarget = null, currentTarget = null;
 const account = new AccountClient(SUPABASE);
 let selectionController=null;
 const selectionCache=new Map();
-let connection=null,groqPool=null,authVersion=0,resumeScreen='import-screen';
+let connection=null,editingConnection=null,translationPool=null,authVersion=0,resumeScreen='import-screen';
 const quotaBudgets=new Map();
+const geminiCooldowns=new Map();
 
 function updateKeyForm(prefix,busy=false) {
   const rows=[...$(`${prefix}-list`).querySelectorAll('.key-row')],count=rows.length;
   document.querySelector(`[data-add-key="${prefix}"]`).disabled=busy || count>=8;
+  const providers=new Set();
   rows.forEach((row,index)=>{
     const input=row.querySelector('input'),show=row.querySelector('[data-show-key]'),remove=row.querySelector('[data-remove-key]');
-    input.setAttribute('aria-label',`Groq API key ${index+1}`);
+    const select=row.querySelector('select'),key=input.value.trim(),detected=keyProvider(key);
+    input.setAttribute('aria-label',`API key ${index+1}`);
+    select.setAttribute('aria-label',`Provider for API key ${index+1}`);
+    select.hidden=!key || !!detected;
+    if(key)providers.add(detected || select.value);
     show.textContent=input.type==='password'?'Show':'Hide';
     show.setAttribute('aria-label',`${show.textContent} key ${index+1}`);
     show.setAttribute('aria-pressed',String(input.type==='text'));
     remove.setAttribute('aria-label',`Remove key ${index+1}`);remove.disabled=busy || count===1;
   });
+  if(prefix==='api-key')$('translation-provider-choice').hidden=!(providers.has('gemini') && providers.has('groq'));
 }
 
 function keyRow(prefix,input,first=false) {
   const list=$(`${prefix}-list`),row=document.createElement('div'),show=document.createElement('button'),remove=document.createElement('button');
+  const provider=document.createElement('select');
+  provider.add(new Option('Choose a provider',''));provider.add(new Option('Gemini','gemini'));provider.add(new Option('Groq','groq'));
+  input.addEventListener('input',()=>{provider.value='';updateKeyForm(prefix);});
+  provider.addEventListener('change',()=>updateKeyForm(prefix));
   row.className='key-row'+(first?' first-key-row':'');
   show.type='button';show.className='text-button';show.dataset.showKey='';
   show.addEventListener('click',()=>{input.type=input.type==='password'?'text':'password';updateKeyForm(prefix);});
@@ -44,11 +58,12 @@ function keyRow(prefix,input,first=false) {
     if(list.querySelectorAll('input').length===1)return;
     if(first){
       const next=list.querySelector('.key-row:not(.first-key-row)');
-      input.value=next.querySelector('input').value;input.type='password';next.querySelector('input').value='';next.remove();
+      input.value=next.querySelector('input').value;input.type='password';provider.value=next.querySelector('select').value;
+      next.querySelector('input').value='';next.remove();
     }else{input.value='';row.remove();}
     updateKeyForm(prefix);
   });
-  row.append(input,show,remove);list.append(row);updateKeyForm(prefix);
+  row.append(input,show,remove,provider);list.append(row);updateKeyForm(prefix);
 }
 for(const prefix of ['api-key','signup-key'])keyRow(prefix,$(prefix),true);
 
@@ -61,9 +76,11 @@ function addKeyField(prefix,value='') {
 for(const button of document.querySelectorAll('[data-add-key]'))button.addEventListener('click',()=>addKeyField(button.dataset.addKey)?.focus());
 
 function keyFormValue(prefix) {
-  return normalizeConnection({keys:[...$(`${prefix}-list`).querySelectorAll('input')].map(input=>input.value),independent:true});
+  const rows=[...$(`${prefix}-list`).querySelectorAll('.key-row')];
+  return normalizeConnection({keys:rows.map(row=>row.querySelector('input').value),independent:true,
+    providers:rows.map(row=>row.querySelector('select').value || null)},{requireProvider:true});
 }
-const vaultValue=value=>value.keys.length===1?value.keys[0]:value;
+const vaultValue=value=>value.keys.length===1 && !value.providers?value.keys[0]:value;
 
 function authStatus(message='') {
   $('auth-status').textContent=message;$('auth-status').hidden=!message;
@@ -78,7 +95,7 @@ function authMode(mode) {
 
 function authBusy(value) {
   $('change-key').disabled=value;
-  document.querySelectorAll('#auth-screen input,#auth-screen button').forEach(element=>element.disabled=value);
+  document.querySelectorAll('#auth-screen input,#auth-screen button,#auth-screen select').forEach(element=>element.disabled=value);
   for(const button of document.querySelectorAll('[data-auth-mode]')){
     if(button.dataset.authMode!=='key')button.disabled=value || !account.configured || !!account.user;
   }
@@ -89,25 +106,57 @@ function clearSecrets() {
   for(const id of ['api-key','login-password','signup-password','signup-password-confirm','signup-key'])$(id).value='';
   for(const prefix of ['api-key','signup-key']){
     $(prefix).type='password';
+    $(prefix).closest('.key-row').querySelector('select').value='';
     $(`${prefix}-list`).querySelectorAll('.key-row:not(.first-key-row)').forEach(row=>{row.querySelector('input').value='';row.remove();});
     updateKeyForm(prefix);
   }
+  $('translation-provider').value='gemini';
   $('signup-password-confirm').setCustomValidity('');
 }
 
-async function connect(value,version) {
+function fillKeyForm(value,provider='gemini') {
+  clearSecrets();
+  editingConnection=value;
+  if(connectionKeys(value,'gemini').length && connectionKeys(value,'groq').length)$('translation-provider').value=provider;
+  value.keys.forEach((key,index)=>{
+    const input=index===0?$('api-key'):addKeyField('api-key',key);
+    input.value=key;
+    input.closest('.key-row').querySelector('select').value=keyProvider(key)?'':value.providers?.[index] || 'groq';
+  });
+  updateKeyForm('api-key');
+}
+
+async function checkedPool(value,provider,previous=null) {
+  const pool=await createTranslationPool(value,fetch,{provider,budgets:quotaBudgets,geminiCooldowns});
+  const [gemini]=connectionKeys(value,'gemini');
+  if(gemini && (pool.provider==='gemini' || !previous || gemini!==connectionKeys(previous,'gemini')[0]))await checkGeminiKey(gemini);
+  return pool;
+}
+
+function connect(value,version,pool) {
   if(version!==authVersion)return;
-  const normalized=normalizeConnection(value),pool=await createGroqPool(normalized,fetch,{budgets:quotaBudgets});
-  if(version!==authVersion)return;
-  connection=normalized;groqPool=pool;service?.reset();
-  service=new PreparationClient({configured:true,model:MODEL,prompt_version:PROMPT_VERSION,concurrency:pool.concurrency},pool.prepare,preparationChanged);
+  connection=value;editingConnection=null;translationPool=pool;service?.reset();selectionCache.clear();
+  service=new PreparationClient({configured:true,model:pool.model,prompt_version:PROMPT_VERSION,concurrency:pool.concurrency},pool.prepare,preparationChanged);
   clearSecrets();authStatus();notice('');
-  $('session-controls').hidden=false;
-  $('session-label').textContent=account.user?.username || '';
-  $('disconnect').textContent=account.user?'Log out':'Disconnect';
+  showSessionControls();
   screen(resumeScreen);
   if(resumeScreen==='reader-screen' && documentData){prepareVisible();if(pdfReader)queuePdfPages();}
   else if(resumeScreen==='import-screen')$('paste').focus();
+}
+
+function showSessionControls() {
+  $('session-controls').hidden=false;
+  $('session-label').textContent=account.user?.username || '';
+  $('disconnect').textContent=account.user?'Log out':'Disconnect';
+}
+
+async function connectSaved(value,version) {
+  const normalized=normalizeConnection(value);
+  try {connect(normalized,version,await checkedPool(normalized));}
+  catch(error){
+    if(version!==authVersion)return;
+    showSessionControls();authMode('key');fillKeyForm(normalized);authStatus(error.message);
+  }
 }
 
 for(const button of document.querySelectorAll('[data-auth-mode]'))button.addEventListener('click',()=>{clearSecrets();authMode(button.dataset.authMode);});
@@ -116,19 +165,28 @@ async function authenticate(event,operation) {
   event.preventDefault();const version=++authVersion;authBusy(true);authStatus('Connecting…');
   try {await operation(version);}
   catch(error){if(version===authVersion)authStatus(error.message || 'Could not connect. Please try again.');}
-  finally {if(version===authVersion){clearSecrets();authBusy(false);}}
+  finally {
+    if(version===authVersion){
+      for(const id of ['login-password','signup-password','signup-password-confirm'])$(id).value='';
+      for(const input of document.querySelectorAll('.key-row input'))input.type='password';
+      $('signup-password-confirm').setCustomValidity('');authBusy(false);
+    }
+  }
 }
 
 $('api-key-form').addEventListener('submit',event=>authenticate(event,async version=>{
   const value=keyFormValue('api-key');
+  const provider=$('translation-provider-choice').hidden?undefined:$('translation-provider').value;
+  const pool=await checkedPool(value,provider,editingConnection);
+  if(version!==authVersion)return;
   if(account.user && $('save-key').checked)await account.saveApiKey(vaultValue(value));
-  return connect(value,version);
+  connect(value,version,pool);
 }));
 $('login-form').addEventListener('submit',event=>authenticate(event,async version=>{
   const result=await account.login($('login-email').value,$('login-password').value);
   if(version!==authVersion)return;
-  if(result.apiKey)return connect(result.connection || result.apiKey,version);
-  else {authMode('key');authStatus(result.vaultLocked?'The saved key could not be unlocked. Enter your Groq key to replace it.':'Enter your Groq API key.');}
+  if(result.apiKey)return connectSaved(result.connection || result.apiKey,version);
+  else {authMode('key');authStatus(result.vaultLocked?'The saved key could not be unlocked. Enter an API key to replace it.':'Enter your translation API key.');}
 }));
 function validatePasswordConfirmation() {
   $('signup-password-confirm').setCustomValidity($('signup-password').value===$('signup-password-confirm').value?'':'Passwords do not match.');
@@ -136,26 +194,28 @@ function validatePasswordConfirmation() {
 for(const id of ['signup-password','signup-password-confirm'])$(id).addEventListener('input',validatePasswordConfirmation);
 $('signup-form').addEventListener('submit',event=>authenticate(event,async version=>{
   if($('signup-password').value!==$('signup-password-confirm').value)throw new Error('Passwords do not match.');
-  const email=$('signup-email').value;
-  const result=await account.signUp(email,$('signup-password').value,vaultValue(keyFormValue('signup-key')));
+  const value=keyFormValue('signup-key');
+  const pool=await checkedPool(value);
   if(version!==authVersion)return;
-  if(result.confirmationRequired){authStatus('Username accounts require email confirmation to be disabled in Supabase.');}
-  else if(result.apiKey)return connect(result.connection || result.apiKey,version);
-  else {authMode('key');authStatus('Enter your Groq API key.');}
+  const result=await account.signUp($('signup-email').value,$('signup-password').value,vaultValue(value));
+  if(version!==authVersion)return;
+  if(result.confirmationRequired){clearSecrets();authStatus('Username accounts require email confirmation to be disabled in Supabase.');}
+  else if(result.apiKey)connect(value,version,pool);
+  else {authMode('key');authStatus('Enter your translation API key.');}
 }));
 $('change-key').addEventListener('click',()=>{
-  const previous=connection;
+  const previous=connection || editingConnection,provider=translationPool?.provider;
   resumeScreen=screens.find(name=>name!=='auth-screen' && !$(name).hidden) || resumeScreen;
-  authVersion++;importVersion++;catalogueVersion++;service?.reset();connection=null;groqPool=null;hideTooltip();notice('');
+  authVersion++;importVersion++;catalogueVersion++;service?.reset();connection=null;translationPool=null;hideTooltip();notice('');
   if(!documentData || (pdfReader && !pdfReader.document)){
     documentData=null;wordElements=[];reader.replaceChildren();closePdf();
   }
   screen('auth-screen');clearSecrets();authMode('key');authBusy(false);$('api-key').focus();
-  if(previous){$('api-key').value=previous.keys[0];for(const key of previous.keys.slice(1))addKeyField('api-key',key);}
+  if(previous)fillKeyForm(previous,provider);
 });
 $('disconnect').addEventListener('click',()=>{
   usernameVersion++;clearTimeout(usernameTimer);$('username-suggestion').hidden=true;$('username-status').hidden=true;
-  const version=++authVersion;importVersion++;catalogueVersion++;service?.reset();service=null;connection=null;groqPool=null;
+  const version=++authVersion;importVersion++;catalogueVersion++;service?.reset();service=null;connection=null;editingConnection=null;translationPool=null;
   resumeScreen='import-screen';
   selectionCache.clear();documentData=null;documentName='';wordElements=[];closePdf();reader.replaceChildren();readerChrome();
   for(const id of ['paste','preview-text','file-input','login-email','signup-email'])$(id).value='';
@@ -230,8 +290,12 @@ function notice(text = '',error = false) {
 function screen(id) {
   screens.forEach(name => $(name).hidden = name !== id);
   hideTooltip();
-  $('selection-translate').hidden = true;
-  selectionTarget = null;
+  hideSelectionActions();
+}
+
+function hideSelectionActions() {
+  selectionActions.hidden=true;
+  selectionTarget=null;
 }
 
 function hideTooltip() {
@@ -284,6 +348,21 @@ function lookupWord(word,keepOpen=false) {
   return lookup(word,Number(word.dataset.start),Number(word.dataset.end),keepOpen);
 }
 
+function highlightKey(word) {
+  const {paragraph,start,end}=word.dataset;
+  return `${paragraph}:${start}:${end}`;
+}
+
+function showHighlights() {
+  const marks=highlights.get(documentData);
+  if(!marks)return;
+  for(const word of wordElements){
+    const color=marks.get(highlightKey(word));
+    if(color)word.dataset.highlight=color;
+    else delete word.dataset.highlight;
+  }
+}
+
 function render() {
   const fragment = document.createDocumentFragment();
   wordElements = [];
@@ -305,6 +384,7 @@ function render() {
     fragment.append(p);
   }
   reader.replaceChildren(fragment);
+  showHighlights();
   readerChrome();
   $('document-meta').textContent = `${documentName || 'Pasted text'} · ${wordElements.length.toLocaleString()} words · Danish`;
   screen('reader-screen');
@@ -338,15 +418,16 @@ async function showPdfPage(number=pdfReader?.page || 1) {
   if(!viewer?.document || $('reading-mode').value!=='pdf')return;
   const version=++importVersion;
   number=Math.max(1,Math.min(viewer.document.numPages,Math.trunc(Number(number))||1));
-  hideTooltip();$('selection-translate').hidden=true;notice('Loading page…');
+  hideTooltip();hideSelectionActions();notice('Loading page…');
   try {
     const result=await viewer.show(number,$('pdf-zoom').value,$('reader-paper').clientWidth,text=>importRequest(text));
     if(!result || version!==importVersion || viewer!==pdfReader)return;
-    hideTooltip();$('selection-translate').hidden=true;
+    hideTooltip();hideSelectionActions();
     documentData=result.data;
     reader.replaceChildren(result.element);
     wordElements=[...reader.querySelectorAll('.word')];
     wordElements.forEach((word,index)=>{word.dataset.index=index;word.tabIndex=index?-1:0;});
+    showHighlights();
     $('pdf-page').value=number;$('pdf-page').max=viewer.document.numPages;
     $('pdf-page-count').textContent=`of ${viewer.document.numPages}`;
     $('pdf-previous').disabled=number===1;
@@ -393,7 +474,7 @@ $('pdf-zoom').addEventListener('change',()=>showPdfPage());
 $('recognize-page').addEventListener('click',async()=>{
   const viewer=pdfReader,number=viewer?.page;
   if(!viewer?.document)return;
-  const version=++importVersion;hideTooltip();$('recognize-page').disabled=true;notice('');
+  const version=++importVersion;hideTooltip();hideSelectionActions();$('recognize-page').disabled=true;notice('');
   try{
     await viewer.forceOcr(number,text=>importRequest(text));
     if(viewer!==pdfReader || version!==importVersion)return;
@@ -404,7 +485,7 @@ $('recognize-page').addEventListener('click',async()=>{
   finally{$('recognize-page').disabled=false;}
 });
 $('reading-mode').addEventListener('change',async()=>{
-  hideTooltip();$('selection-translate').hidden=true;
+  hideTooltip();hideSelectionActions();
   if($('reading-mode').value==='pdf'){readerChrome();await showPdfPage();return;}
   const viewer=pdfReader,version=++importVersion;
   $('pdf-controls').hidden=true;
@@ -470,8 +551,9 @@ $('start-reading').addEventListener('click',async () => {
   try {
     const result = await importRequest($('preview-text').value);
     if(version!==importVersion)return;
-    service.reset();documentData=result;
-    if(pdfReader)pdfTextData=result;
+    service.reset();
+    if(documentData?.text!==result.text)documentData=result;
+    if(pdfReader)pdfTextData=documentData;
     render();
     if(pdfReader)queuePdfPages(pdfReader);
   } catch(error) {notice(error.message || 'Could not import this text.',true);}
@@ -527,45 +609,65 @@ reader.addEventListener('keydown',event => {
     if(!pinned)hideTooltip();
   } else if(event.key==='Enter' || event.key===' ') {event.preventDefault();lookupWord(word,true);}
 });
-document.addEventListener('keydown',event => {if(event.key==='Escape'){hideTooltip();$('selection-translate').hidden=true;window.getSelection().removeAllRanges();}});
+document.addEventListener('keydown',event => {if(event.key==='Escape'){hideTooltip();hideSelectionActions();window.getSelection().removeAllRanges();}});
 
 function captureSelection() {
   const selection=window.getSelection();
-  $('selection-translate').hidden=true;selectionTarget=null;
-  if(selection.isCollapsed || !selection.rangeCount)return;
+  hideSelectionActions();
+  if($('reader-screen').hidden || selection.isCollapsed || !selection.rangeCount)return;
   const range=selection.getRangeAt(0);
-  const selected=[...reader.querySelectorAll('.word')].filter(word => range.intersectsNode(word));
+  const selected=wordElements.filter(word => range.intersectsNode(word));
   if(!selected.length)return;
   const across=selected[0].dataset.paragraph!==selected.at(-1).dataset.paragraph;
   hideTooltip();
-  selectionTarget={element:selected[0],start:Number(selected[0].dataset.start),end:Number(selected.at(-1).dataset.end)};
+  const target={selected,element:selected[0],start:Number(selected[0].dataset.start),end:Number(selected.at(-1).dataset.end)};
   if(across){
     const text=selection.toString().trim(),tokens=words(text);
     if(!tokens.length)return;
-    selectionTarget={element:selected[0],start:tokens[0].start,end:tokens.at(-1).end,paragraph:{text,words:tokens}};
+    Object.assign(target,{start:tokens[0].start,end:tokens.at(-1).end,paragraph:{text,words:tokens}});
   }
-  const rect=range.getBoundingClientRect(),button=$('selection-translate');
-  button.hidden=false;
-  button.style.left=`${Math.max(12,Math.min(rect.left,window.innerWidth-button.offsetWidth-12))}px`;
-  button.style.top=`${Math.max(12,Math.min(rect.bottom+8,window.innerHeight-button.offsetHeight-12))}px`;
+  selectionTarget=target;
+  $('selection-clear-highlight').hidden=!selected.some(word=>word.dataset.highlight);
+  const rect=range.getBoundingClientRect();
+  selectionActions.hidden=false;
+  selectionActions.style.left=`${Math.max(12,Math.min(rect.left,window.innerWidth-selectionActions.offsetWidth-12))}px`;
+  selectionActions.style.top=`${Math.max(12,Math.min(rect.bottom+8,window.innerHeight-selectionActions.offsetHeight-12))}px`;
 }
 reader.addEventListener('mouseup',captureSelection);
+reader.addEventListener('touchend',()=>requestAnimationFrame(captureSelection),{passive:true});
 reader.addEventListener('keyup',event => {if(event.shiftKey)captureSelection();});
-$('selection-translate').addEventListener('pointerdown',event=>event.preventDefault());
+selectionActions.addEventListener('pointerdown',event=>event.preventDefault());
 $('selection-translate').addEventListener('click',() => {
   if(!selectionTarget)return;
   const {element,start,end,paragraph:selectionParagraph}=selectionTarget;
-  $('selection-translate').hidden=true;window.getSelection().removeAllRanges();
+  hideSelectionActions();window.getSelection().removeAllRanges();
   const paragraph=paragraphFor(element);
   if(!selectionParagraph && service.get(paragraph,start,end,$('language').value))lookup(element,start,end,true);
   else translateSelection(element,start,end,selectionParagraph);
 });
+function markSelection(color) {
+  if(!selectionTarget)return;
+  if(!highlights.has(documentData))highlights.set(documentData,new Map());
+  const marks=highlights.get(documentData);
+  for(const word of selectionTarget.selected){
+    const key=highlightKey(word);
+    if(color)marks.set(key,color);
+    else marks.delete(key);
+  }
+  showHighlights();hideSelectionActions();window.getSelection().removeAllRanges();
+}
+$('selection-highlight').addEventListener('click',()=>markSelection(highlightColors.querySelector(':checked').value));
+$('selection-clear-highlight').addEventListener('click',()=>markSelection());
 document.addEventListener('pointerdown',event => {
-  if(!tooltip.contains(event.target) && !reader.contains(event.target) && event.target!==$('selection-translate'))hideTooltip();
+  if(selectionActions.contains(event.target) || highlightColors.contains(event.target))return;
+  if(!reader.contains(event.target)){
+    hideSelectionActions();
+    if(!tooltip.contains(event.target))hideTooltip();
+  }
 });
 let visibleTimer;
 function scrollTranslation() {
-  $('selection-translate').hidden=true;if(pinned)position();else hideTooltip();
+  hideSelectionActions();if(pinned)position();else hideTooltip();
   clearTimeout(visibleTimer);visibleTimer=setTimeout(()=>{if(!$('reader-screen').hidden)prepareVisible();},180);
 }
 window.addEventListener('scroll',scrollTranslation,{passive:true});
@@ -578,11 +680,11 @@ $('retry-preparation').addEventListener('click',()=>service?.retry());
 
 async function translateSelection(element,start,end,selectionParagraph) {
   hideTooltip();pinned=true;anchor=element;
-  const paragraph=selectionParagraph || paragraphFor(element),language=$('language').value,owner=service;
+  const paragraph=selectionParagraph || paragraphFor(element),language=$('language').value,owner=service,pool=translationPool;
   let chunk;
   try {chunk=contextFor(paragraph,start,end);}catch(error){notice(error.message,true);return;}
   const {offset,...payload}=chunk;
-  const key=JSON.stringify([paragraph.text,start,end,language,MODEL]);
+  const key=JSON.stringify([paragraph.text,start,end,language,pool.model]);
   $('translation-text').lang=language;
   if(selectionCache.has(key)){$('translation-text').textContent=selectionCache.get(key);tooltip.hidden=false;position();return;}
   const controller=new AbortController();selectionController=controller;
@@ -590,12 +692,12 @@ async function translateSelection(element,start,end,selectionParagraph) {
   owner.suspended=true;owner.manualRequest=controller;
   owner.yieldWaiting();
   try {
-    while(owner.active || Date.now()<Math.max(owner.nextAt,owner.pausedUntil)){
+    while(owner.active || (pool.provider==='groq' && Date.now()<Math.max(owner.nextAt,owner.pausedUntil))){
       await new Promise(resolve=>setTimeout(resolve,100));
       if(controller.signal.aborted)return;
     }
     const started=Date.now();
-    const response=await groqPool.selection('selection',{
+    const response=await pool.selection('selection',{
       body:JSON.stringify({...payload,language}),signal:controller.signal});
     const result=await response.json();
     if(controller.signal.aborted || service!==owner || $('language').value!==language)return;
@@ -643,8 +745,8 @@ async function restoreSignIn() {
   try{
     const result=await account.restore();
     if(version!==authVersion)return;
-    if(result?.apiKey)await connect(result.connection || result.apiKey,version);
-    else {authMode('key');if(result)authStatus('Enter your Groq API key.');}
+    if(result?.apiKey)await connectSaved(result.connection || result.apiKey,version);
+    else {authMode('key');if(result)authStatus('Enter your translation API key.');}
   }catch(error){if(version===authVersion){authMode('login');authStatus(error.message);}}
   finally{if(version===authVersion)authBusy(false);}
 }

@@ -80,6 +80,15 @@ test('expired remembered access tokens refresh and rotate before restoring legac
   assert.ok(server.requests.some(request=>request.url.searchParams.get('grant_type')==='refresh_token'));
 });
 
+test('a manually classified Gemini key restores with its provider inside the vault',async()=>{
+  const server=provider(),storage=rememberedStorage(),client=new AccountClient(config,server.fetcher,{storage});
+  await client.login(alice.email,password);
+  const connection={keys:['unfamiliar-test-key'],independent:false,providers:['gemini']};
+  await client.saveApiKey(connection);
+  assert.doesNotMatch(JSON.stringify(server.metadata.get(alice.id)),/unfamiliar-test-key|gemini/);
+  assert.deepEqual((await new AccountClient(config,server.fetcher,{storage}).restore()).connection,connection);
+});
+
 test('revoked remembered sessions are removed and cannot restore account or keys',async()=>{
   const server=provider(),storage=rememberedStorage(),client=new AccountClient(config,server.fetcher,{storage});
   await client.login(alice.email,password);await client.saveApiKey('gsk_secret');

@@ -21,12 +21,15 @@ test('Pages artifact contains only public assets and relative entry points',asyn
   assert.ok((await stat('dist/vendor/pdfjs/build/pdf.worker.min.mjs')).size>10000);
 });
 
-test('build rejects an accidentally embedded Groq credential before publishing',async()=>{
+test('build rejects accidentally embedded Groq and Gemini credentials before publishing',async()=>{
   const file='static/_build-secret-check.js';
-  await writeFile(file,`export const leaked='${'gsk_'+'a'.repeat(40)}';`,{flag:'wx'});
+  await writeFile(file,'',{flag:'wx'});
   try {
-    assert.throws(()=>execFileSync(process.execPath,['scripts/build.mjs'],{stdio:'pipe'}),
-      error=>error.status!==0 && error.stderr.toString().includes('private key'));
+    for(const key of ['gsk_'+'a'.repeat(40),'AQ.'+'a'.repeat(40),'AIza'+'a'.repeat(35)]){
+      await writeFile(file,`export const leaked='${key}';`);
+      assert.throws(()=>execFileSync(process.execPath,['scripts/build.mjs'],{stdio:'pipe'}),
+        error=>error.status!==0 && error.stderr.toString().includes('private key'));
+    }
     assert.ok(!(await readdir('dist')).includes('_build-secret-check.js'));
   } finally {await unlink(file);}
 });

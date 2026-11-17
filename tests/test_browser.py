@@ -1,4 +1,4 @@
-"""Opt-in real Chrome checks. Groq calls are always intercepted, never live."""
+"""Opt-in real Chrome checks. Model API calls are intercepted."""
 import os
 import json
 import re
@@ -13,6 +13,7 @@ import pytest
 pytestmark=pytest.mark.skipif(os.getenv("RUN_BROWSER_TESTS")!="1",reason="Opt-in real browser checks")
 PREFIX = "/DanskReadingApp/"
 GROQ = "https://api.groq.com/openai/v1/chat/completions"
+GEMINI = "https://generativelanguage.googleapis.com/v1beta"
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -86,6 +87,7 @@ def browser_page(base_url):
                 ad_hoc.append(route.request.url)
                 route.abort()
         page.route("**/*",isolated)
+        page.route("https://cloud.umami.is/script.js", lambda route: route.fulfill(body="", content_type="application/javascript"))
         def background(route):
             body=route.request.post_data_json
             assert body["response_format"]["type"]=="json_schema"
@@ -126,6 +128,75 @@ def select_words(page,first,last,click=True):
       document.getElementById('reader').dispatchEvent(new MouseEvent('mouseup',{bubbles:true}));
     }""",[first,last])
     if click:page.locator("#selection-translate").click()
+
+
+def test_text_highlights_recolor_and_clear_across_paragraphs(page):
+    text = "Det er lige meget.\n\nHun slog ordet op."
+    page.set_viewport_size({"width":390,"height":844})
+    read(page,text)
+    before = len(page.preparations)
+    page.get_by_role("radio",name="Blue").check(timeout=2000)
+    select_words(page,"meget","Hun",click=False)
+    assert page.get_by_role("button",name="Translate selection").is_visible()
+    page.get_by_role("button",name="Highlight",exact=True).click()
+    assert page.locator('[data-highlight="blue"]').all_text_contents() == ["meget","Hun"]
+    assert page.locator('[data-highlight="blue"]').first.evaluate("el => getComputedStyle(el).backgroundColor") != "rgba(0, 0, 0, 0)"
+
+    page.get_by_role("radio",name="Pink").check()
+    select_words(page,"meget","meget",click=False)
+    page.get_by_role("button",name="Highlight",exact=True).click()
+    assert page.locator('[data-highlight="pink"]').all_text_contents() == ["meget"]
+    select_words(page,"meget","meget",click=False)
+    page.get_by_role("button",name="Remove highlight").click()
+    assert page.locator('[data-highlight]').all_text_contents() == ["Hun"]
+    assert len(page.preparations) == before
+
+    page.locator("#new-document").click()
+    read(page,text)
+    assert page.locator('[data-highlight]').count() == 0
+
+
+def test_gemini_personal_key_falls_back_and_can_switch_to_groq(browser_page):
+    page = browser_page
+    models = []
+    key_checks = []
+
+    def gemini(route):
+        request = route.request
+        assert request.headers["x-goog-api-key"] == "AQ.browser-test-only"
+        if "/models?" in request.url:
+            assert request.method == "GET" and request.post_data is None
+            key_checks.append(request.url)
+            route.fulfill(json={"models": []})
+            return
+        body = request.post_data_json
+        assert body["store"] is False
+        models.append(body["model"])
+        if body["model"] == "gemini-3.1-flash-lite":
+            route.fulfill(status=429, json={"error": {"code": "quota_exceeded"}})
+            return
+        prompt = {"messages": [{"content": body["system_instruction"]}, {"content": body["input"]}]}
+        answer = prepared(prompt)["choices"][0]["message"]["content"]
+        route.fulfill(json={"steps": [{"type": "model_output", "content": [{"type": "text", "text": answer}]}]})
+
+    page.route(f"{GEMINI}/**", gemini)
+    page.locator("#api-key").fill("AQ.browser-test-only")
+    page.locator('[data-add-key="api-key"]').click()
+    page.locator("#api-key-list input").nth(1).fill("gsk_browser_test_only")
+    page.locator("#api-key-form").get_by_role("button", name="Continue", exact=True).click()
+    read(page, "Det er lige meget.")
+    select_words(page, "Det", "er")
+    page.locator("#translation-text").filter(has_text="It is").wait_for()
+    assert models == ["gemini-3.1-flash-lite", "gemini-4-hydrogen", "gemini-4-hydrogen"]
+    assert len(key_checks) == 1
+    assert page.preparations == []
+
+    page.get_by_role("button", name="Manage keys").click()
+    page.get_by_label("Translation provider").select_option("groq")
+    page.locator("#api-key-form").get_by_role("button", name="Continue", exact=True).click()
+    ready(page)
+    assert page.preparations
+    assert len(models) == 3
 
 
 def test_username_signup_login_and_disconnect_keep_secrets_in_memory(browser_page):
@@ -658,6 +729,22 @@ def upload_pdf(page,data,wait=True):
     page.locator("#file-input").set_input_files({"name":"historie.pdf","mimeType":"application/pdf","buffer":data})
     page.locator(".pdf-page .word").first.wait_for()
     if wait:ready(page)
+
+
+def test_pdf_highlights_survive_zoom_and_returning_to_the_page(page):
+    upload_pdf(page,layout_pdf())
+    select_words(page,"lige","meget",click=False)
+    page.get_by_role("button",name="Highlight",exact=True).click(timeout=2000)
+    assert page.locator('[data-highlight="yellow"]').all_text_contents() == ["lige","meget"]
+    page.locator("#pdf-zoom").select_option("1.5")
+    page.wait_for_function("()=>document.querySelector('.pdf-page')?.clientWidth===900")
+    assert page.locator('[data-highlight="yellow"]').all_text_contents() == ["lige","meget"]
+    page.locator("#pdf-next").click()
+    page.get_by_text("Hun",exact=True).wait_for()
+    assert page.locator('[data-highlight]').count() == 0
+    page.locator("#pdf-previous").click()
+    page.locator('[data-highlight="yellow"]').first.wait_for()
+    assert page.locator('[data-highlight="yellow"]').all_text_contents() == ["lige","meget"]
 
 
 def test_original_pdf_hover_zoom_pages_and_view_switch(page):

@@ -1,5 +1,6 @@
 import {estimatePreparation} from './groq.js';
 import {REQUEST_TOKEN_LIMIT} from './budget.js';
+import {translationMetrics} from './translation.js';
 
 function lowerBound(words,position,field) {
   let left=0,right=words.length;
@@ -51,7 +52,7 @@ export class PreparationClient {
     this.records=new Map();this.queue=[];this.jobs=new Set();this.timer=null;
     this.language='en';this.epoch=0;this.nextAt=0;this.pausedUntil=0;this.error='';
     this.discovering=false;
-    this.metrics={requests:0,request_ms:0,budget_wait_ms:0,input_tokens:0,output_tokens:0,total_tokens:0,cached_tokens:0,estimated_tokens:0};
+    this.metrics=translationMetrics();
   }
 
   key(paragraph,language) {return JSON.stringify([this.config.model,this.config.prompt_version,language,paragraph.text]);}
@@ -173,7 +174,7 @@ export class PreparationClient {
     if(this.jobs.size>=Math.max(1,Math.min(8,this.config.concurrency || 1)) || this.timer || this.error || this.suspended)return;
     const index=this.queue.findIndex(job=>job.language===this.language);
     if(index<0)return;
-    if(!this.config.configured){this.error='Enter your Groq API key to prepare meanings.';this.onChange();return;}
+    if(!this.config.configured){this.error='Enter your translation API key to prepare meanings.';this.onChange();return;}
     if(Date.now()<this.nextAt){
       this.timer=setTimeout(()=>{this.timer=null;this.pump();},this.nextAt-Date.now());
       return;

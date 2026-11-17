@@ -1,6 +1,37 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {normalizeConnection,createGroqPool} from '../static/keys.js';
+import * as keys from '../static/keys.js';
+
+test('detects key providers, rejects ambiguous form input and allows one distinct Gemini key',()=>{
+  assert.equal(keys.keyProvider('gsk_example'),'groq');
+  assert.equal(keys.keyProvider('AQ.example'),'gemini');
+  assert.equal(keys.keyProvider('AIzaexample'),'gemini');
+  assert.throws(()=>normalizeConnection({keys:['unknown']},{requireProvider:true}),/choose a provider/i);
+  assert.deepEqual(normalizeConnection({keys:['gsk_example','unknown','unknown'],providers:[null,'gemini','gemini']},{requireProvider:true}),
+    {keys:['gsk_example','unknown'],independent:false,providers:[null,'gemini']});
+  assert.throws(()=>normalizeConnection({keys:['AQ.first','AIzaSecond']}),/one Gemini/i);
+});
+
+test('mixed connections select Gemini by default and Groq by explicit choice',async()=>{
+  const connection={keys:['gsk_example','AQ.example']};
+  const requests=[];
+  const fetcher=async(url,options)=>{
+    requests.push({url,options});
+    const text=JSON.stringify({entries:[{word_ids:[0],translation:'hello',uncertain:false}]});
+    if(url.includes('generativelanguage'))return Response.json({steps:[{type:'model_output',content:[{type:'text',text}]}]});
+    return Response.json({choices:[{message:{content:text}}]});
+  };
+  const body=JSON.stringify({context:'Hej',start:0,end:3,language:'en'});
+  for(const [choice,expected] of [[undefined,'gemini'],['groq','groq']]){
+    const pool=await keys.createTranslationPool(connection,fetcher,{provider:choice});
+    assert.equal(pool.provider,expected);
+    assert.equal(pool.concurrency,1);
+    assert.equal((await pool.prepare('prepare',{body})).status,200);
+  }
+  assert.equal(new Headers(requests[0].options.headers).get('x-goog-api-key'),'AQ.example');
+  assert.equal(new Headers(requests[1].options.headers).get('authorization'),'Bearer gsk_example');
+});
 
 test('key lists validate, deduplicate and preserve legacy vault preference fields',()=>{
   assert.deepEqual(normalizeConnection(' gsk_one '),{keys:['gsk_one'],independent:false});

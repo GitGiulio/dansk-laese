@@ -17,7 +17,8 @@ async function assets(directory) {
     if(entry.isDirectory())files.push(...await assets(file));
     else if(entry.isFile()){
       const content=await readFile(file,'utf8');
-      if(/gsk_[a-z\d]{20,}|sb_secret_[\w-]{15,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/i.test(content))throw new Error('A public asset appears to contain a private key. Build stopped.');
+      if(/gsk_[a-z\d]{20,}|sb_secret_[\w-]{15,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/i.test(content)
+        || /\b(?:AIza[\w-]{35}|AQ\.[\w-]{30,})/.test(content))throw new Error('A public asset appears to contain a private key. Build stopped.');
       files.push(file);
     }
   }
